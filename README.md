@@ -8,6 +8,9 @@
 ---
 
 # Ghirbal | غربال - Safe Web Browser
+<div align="center">
+<img src="image_a.jpeg" width="150">  <img src="image_b.jpeg" width="150"> 
+</div>
 
 ## 🌐 Overview
 
@@ -184,7 +187,6 @@ The application includes experimental system-level permissions that should be ke
 - Keep system-level permissions OFF by default
 - Use the browser's built-in permission system instead
 - Grant permissions on a per-site basis as needed
-- The JavaScript-based gatekeeper provides sufficient protection
 
 ## 📋 Blocklist Configuration
 
