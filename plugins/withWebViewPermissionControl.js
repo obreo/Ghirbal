@@ -94,23 +94,10 @@ const withWebViewPermissionControl = (config) => {
           console.log('[withWebViewPermissionControl] ✓ Patched onGeolocationPermissionsShowPrompt');
         }
         
-        // Patch onShowFileChooser method (blocks file/image access)
-        const fileChooserPattern = /public boolean onShowFileChooser\(WebView webView,\s*ValueCallback<Uri\[\]> filePathCallback,\s*FileChooserParams fileChooserParams\)\s*\{/;
-        
-        if (fileChooserPattern.test(content)) {
-          const fileBlockCode = `public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
-        // ABrowserSecurity_PATCHED - FILE/IMAGE ACCESS DENIED
-        android.util.Log.w("ABrowserSecurity", "DENIED file/image access");
-        filePathCallback.onReceiveValue(null);
-        return true;
-    }
-    
-    public boolean _unused_onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {`;
-          
-          content = content.replace(fileChooserPattern, fileBlockCode);
-          patched = true;
-          console.log('[withWebViewPermissionControl] ✓ Patched onShowFileChooser (file/image access)');
-        }
+        // NOTE: We do NOT patch onShowFileChooser because:
+        // - The JavaScript Gatekeeper already blocks file input clicks when storage permission is disabled
+        // - If we deny at the native level, the file manager never opens even when the user grants permission
+        // - The JS gatekeeper handles blocking (prevents click) and the native code handles opening the file manager
         
         if (patched) {
           fs.writeFileSync(chromeClientPath, content);
