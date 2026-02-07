@@ -42,8 +42,6 @@ interface BrowserContextType {
   history: HistoryItem[];
   pendingCacheClear: boolean;
   pendingDataClear: boolean;
-  referringApp: string | null;
-  clearReferringApp: () => void;
   createTab: (url?: string) => string;
   closeTab: (id: string) => void;
   setActiveTab: (id: string) => void;
@@ -85,7 +83,6 @@ export function BrowserProvider({ children }: { children: React.ReactNode }) {
   const [pinnedSites, setPinnedSites] = useState<PinnedSite[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [pendingCacheClear, setPendingCacheClear] = useState(false);
-  const [referringApp, setReferringApp] = useState<string | null>(null);
   const isInitialized = useRef(false);
   const pendingUrl = useRef<string | null>(null);
   const isDataLoaded = useRef(false);
@@ -107,10 +104,6 @@ export function BrowserProvider({ children }: { children: React.ReactNode }) {
 
   const acknowledgeDataClear = useCallback(() => {
     setPendingDataClear(false);
-  }, []);
-
-  const clearReferringApp = useCallback(() => {
-    setReferringApp(null);
   }, []);
 
   const generateId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -437,15 +430,6 @@ export function BrowserProvider({ children }: { children: React.ReactNode }) {
     const result = processUrl(url, 'navigation');
     if (result.blocked) return;
 
-    // For URLs from external apps (when called from the useEffect that handles pendingUrl),
-    // create a new tab instead of replacing the current one
-    // This ensures external app links get their own tab
-    const isFromExternalSource = currentTabs.length > 0;
-
-    if (isFromExternalSource) {
-      setReferringApp('External App');
-    }
-
     // Create a new tab for URLs from external sources
     const newTabId = generateId();
     const newTab: Tab = {
@@ -543,8 +527,6 @@ export function BrowserProvider({ children }: { children: React.ReactNode }) {
         history,
         pendingCacheClear,
         pendingDataClear,
-        referringApp,
-        clearReferringApp,
         createTab,
         closeTab,
         setActiveTab,

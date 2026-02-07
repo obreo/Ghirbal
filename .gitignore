@@ -47,3 +47,5 @@ app-example
 /android
 
 Ghirbal*.apk
+.claude/*
+.idea/*

@@ -71,6 +71,8 @@
     "zod-validation-error": "^3.4.0"
   },
   "devDependencies": {
+    "@react-native/metro-config": "latest",
+    "@react-native-community/cli": "latest",
     "@types/express": "^4.17.21",
     "@types/node": "24.10.0",
     "@types/react": "~19.1.0",

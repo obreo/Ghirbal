@@ -25,6 +25,8 @@ import * as Clipboard from 'expo-clipboard';
 import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Notifications from 'expo-notifications';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as MediaLibrary from 'expo-media-library';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -193,8 +195,6 @@ export default function BrowserScreen() {
     acknowledgeCacheClear,
     pendingDataClear,
     acknowledgeDataClear,
-    referringApp,
-    clearReferringApp,
   } = useBrowser();
 
   const [urlInputValue, setUrlInputValue] = useState('https://safesearchengine.com/');
@@ -750,6 +750,7 @@ export default function BrowserScreen() {
       
       document.addEventListener('touchstart', function(e) {
         const link = e.target.closest('a');
+        var img = e.target.tagName === 'IMG' ? e.target : e.target.closest('img');
         if (link && link.href) {
           longPressTarget = link;
           longPressTimer = setTimeout(function() {
@@ -758,6 +759,17 @@ export default function BrowserScreen() {
               type: 'longPressLink',
               url: link.href,
               text: link.textContent || link.href
+            }));
+            longPressTarget = null;
+          }, 500);
+        } else if (img && img.src) {
+          longPressTarget = img;
+          longPressTimer = setTimeout(function() {
+            e.preventDefault();
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'longPressImage',
+              url: img.src,
+              alt: img.alt || ''
             }));
             longPressTarget = null;
           }, 500);
@@ -777,6 +789,106 @@ export default function BrowserScreen() {
           longPressTimer = null;
         }
       });
+
+      // Suppress native drag on long-pressed images to avoid Android drag error
+      document.addEventListener('dragstart', function(e) { e.preventDefault(); }, true);
+
+      // Intercept blob: URL downloads to prevent DownloadManager error
+      document.addEventListener('click', function(e) {
+        var anchor = e.target.closest ? e.target.closest('a[download]') : null;
+        if (!anchor) {
+          var el = e.target;
+          while (el && el !== document) {
+            if (el.tagName === 'A' && el.hasAttribute('download')) { anchor = el; break; }
+            el = el.parentElement;
+          }
+        }
+        if (anchor && anchor.href && anchor.href.startsWith('blob:')) {
+          e.preventDefault();
+          e.stopPropagation();
+          (async function() {
+            try {
+              var resp = await fetch(anchor.href);
+              var blob = await resp.blob();
+              var reader = new FileReader();
+              reader.onloadend = function() {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'blobData',
+                  dataUrl: reader.result
+                }));
+              };
+              reader.readAsDataURL(blob);
+            } catch(err) {
+              console.log('[BlobIntercept] Failed:', err);
+            }
+          })();
+        }
+      }, true);
+    })();
+    true;
+  `;
+
+  // Intercept blob: URL downloads at the prototype level (preload).
+  // Android's native DownloadManager only supports HTTP/HTTPS, so blob: downloads
+  // crash with IllegalArgumentException. We capture blobs when URL.createObjectURL
+  // is called, then use the stored reference on download (avoids fetch + CSP issues).
+  const blobDownloadInterceptJS = `
+    (function() {
+      console.log('[BlobIntercept] Preload script initializing on:', location.hostname);
+      // Store blob references when createObjectURL is called (exposed on window for onFileDownload fallback)
+      window.__blobMap = window.__blobMap || {};
+      var __blobMap = window.__blobMap;
+      var origCreate = URL.createObjectURL;
+      URL.createObjectURL = function(obj) {
+        var url = origCreate.call(this, obj);
+        if (obj instanceof Blob) {
+          __blobMap[url] = obj;
+          console.log('[BlobIntercept] Captured blob:', url, 'type:', obj.type, 'size:', obj.size);
+        }
+        return url;
+      };
+      var origRevoke = URL.revokeObjectURL;
+      URL.revokeObjectURL = function(url) {
+        if (__blobMap[url]) {
+          console.log('[BlobIntercept] Blob revoked:', url);
+        }
+        delete __blobMap[url];
+        return origRevoke.call(this, url);
+      };
+
+      // Intercept click on <a download> with blob: href
+      var origClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function() {
+        console.log('[BlobIntercept] click() called on <a>, href:', this.href, 'hasDownload:', this.hasAttribute('download'));
+        if (this.href && this.href.startsWith('blob:') && this.hasAttribute('download')) {
+          var blob = __blobMap[this.href];
+          console.log('[BlobIntercept] Blob found in map:', !!blob, blob ? ('type:' + blob.type + ' size:' + blob.size) : 'N/A');
+          if (blob) {
+            var reader = new FileReader();
+            reader.onloadend = function() {
+              console.log('[BlobIntercept] FileReader done, dataUrl length:', reader.result ? reader.result.length : 0);
+              if (window.ReactNativeWebView) {
+                console.log('[BlobIntercept] Sending blobData message to RN');
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'blobData',
+                  dataUrl: reader.result
+                }));
+              } else {
+                console.log('[BlobIntercept] ERROR: ReactNativeWebView not available');
+              }
+            };
+            reader.onerror = function() {
+              console.log('[BlobIntercept] FileReader ERROR:', reader.error);
+            };
+            reader.readAsDataURL(blob);
+            return;
+          } else {
+            console.log('[BlobIntercept] Blob NOT found in __blobMap, keys:', Object.keys(__blobMap).length);
+          }
+        }
+        return origClick.call(this);
+      };
+      console.log('[BlobIntercept] Preload script initialized successfully');
     })();
     true;
   `;
@@ -1046,6 +1158,7 @@ export default function BrowserScreen() {
   `;
   const SAFE_SEARCH_HOMEPAGE = 'https://www.safesearchengine.com/';
   const [linkContextMenu, setLinkContextMenu] = useState<{ url: string; text: string } | null>(null);
+  const [imageContextMenu, setImageContextMenu] = useState<{ url: string; alt: string } | null>(null);
 
   const [lockIconMenu, setLockIconMenu] = useState(false);
   const [lockMenuHostname, setLockMenuHostname] = useState('');
@@ -1081,6 +1194,142 @@ export default function BrowserScreen() {
       setLinkContextMenu({ url, text });
     }
   }, [createTab]);
+
+  const handleImageDownload = useCallback(async (imageUrl: string) => {
+    // Request media library permission
+    const { status } = await MediaLibrary.requestPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Storage permission is needed to save images.');
+      return;
+    }
+
+    if (imageUrl.startsWith('blob:') || imageUrl.startsWith('data:')) {
+      // For blob/data URLs, use JS injection since they're page-context-bound
+      const js = `
+        (async function() {
+          try {
+            var resp = await fetch("${imageUrl.replace(/"/g, '\\"')}");
+            var blob = await resp.blob();
+            var reader = new FileReader();
+            reader.onloadend = function() {
+              window.ReactNativeWebView.postMessage(JSON.stringify({
+                type: 'imageDownloadData',
+                dataUrl: reader.result
+              }));
+            };
+            reader.readAsDataURL(blob);
+          } catch(e) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({
+              type: 'imageDownloadData',
+              error: e.message
+            }));
+          }
+        })();
+        true;
+      `;
+      webViewRef.current?.injectJavaScript(js);
+    } else {
+      // For HTTP/HTTPS URLs, download to cache then save to gallery
+      try {
+        // Determine extension from URL path
+        let ext = '.jpg';
+        try {
+          const urlPath = new URL(imageUrl).pathname.toLowerCase();
+          if (urlPath.match(/\.png(\?|$)/)) ext = '.png';
+          else if (urlPath.match(/\.gif(\?|$)/)) ext = '.gif';
+          else if (urlPath.match(/\.webp(\?|$)/)) ext = '.webp';
+          else if (urlPath.match(/\.jpe?g(\?|$)/)) ext = '.jpg';
+        } catch {}
+
+        const fileName = `image_${Date.now()}${ext}`;
+        const filePath = `${FileSystem.cacheDirectory}${fileName}`;
+
+        // Download with proper headers (many CDNs block bare requests)
+        const currentPage = activeTab?.url || '';
+        const result = await FileSystem.downloadAsync(imageUrl, filePath, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.102 Mobile Safari/537.36',
+            'Referer': currentPage,
+            'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+          },
+        });
+
+        console.log('[ImageDownload] Status:', result.status, 'CT:', result.headers?.['content-type']);
+
+        if (result.status === 200) {
+          // Check if Content-Type differs from our extension
+          const ct = (result.headers?.['content-type'] || '').toLowerCase();
+          if (ct && ct.startsWith('image/')) {
+            let correctExt = ext;
+            if (ct.includes('png')) correctExt = '.png';
+            else if (ct.includes('gif')) correctExt = '.gif';
+            else if (ct.includes('webp')) correctExt = '.webp';
+            else if (ct.includes('jpeg') || ct.includes('jpg')) correctExt = '.jpg';
+
+            if (correctExt !== ext) {
+              const correctPath = `${FileSystem.cacheDirectory}image_${Date.now()}${correctExt}`;
+              await FileSystem.copyAsync({ from: filePath, to: correctPath });
+              await MediaLibrary.saveToLibraryAsync(correctPath);
+              Alert.alert('Image Saved', 'Image has been saved to your gallery.');
+              return;
+            }
+          }
+          await MediaLibrary.saveToLibraryAsync(filePath);
+          Alert.alert('Image Saved', 'Image has been saved to your gallery.');
+        } else {
+          // Direct download failed (403, etc.) — fall back to fetching via WebView context
+          console.log('[ImageDownload] Direct download failed, falling back to WebView fetch');
+          const js = `
+            (async function() {
+              try {
+                var resp = await fetch("${imageUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}");
+                var blob = await resp.blob();
+                var reader = new FileReader();
+                reader.onloadend = function() {
+                  window.ReactNativeWebView.postMessage(JSON.stringify({
+                    type: 'imageDownloadData',
+                    dataUrl: reader.result
+                  }));
+                };
+                reader.readAsDataURL(blob);
+              } catch(e) {
+                window.ReactNativeWebView.postMessage(JSON.stringify({
+                  type: 'imageDownloadData',
+                  error: e.message
+                }));
+              }
+            })();
+            true;
+          `;
+          webViewRef.current?.injectJavaScript(js);
+        }
+      } catch (err) {
+        console.error('[ImageDownload] Error:', err);
+        Alert.alert('Download Failed', 'Could not download the image.');
+      }
+    }
+  }, []);
+
+  const showImageContextMenu = useCallback((url: string, alt: string) => {
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options: ['Save Image', 'Copy Image URL', 'Cancel'],
+          cancelButtonIndex: 2,
+          title: alt || 'Image',
+        },
+        (buttonIndex) => {
+          if (buttonIndex === 0) {
+            handleImageDownload(url);
+          } else if (buttonIndex === 1) {
+            Clipboard.setStringAsync(url);
+          }
+        }
+      );
+    } else {
+      setImageContextMenu({ url, alt });
+    }
+  }, [handleImageDownload]);
 
   const handleUrlSubmit = useCallback(() => {
     Keyboard.dismiss();
@@ -1174,6 +1423,40 @@ export default function BrowserScreen() {
         webViewRef.current?.reload();
       } else if (data.type === 'longPressLink') {
         showLinkContextMenu(data.url, data.text);
+      } else if (data.type === 'longPressImage') {
+        showImageContextMenu(data.url, data.alt);
+      } else if (data.type === 'imageDownloadData') {
+        if (data.error) {
+          Alert.alert('Download Failed', 'Could not download the image.');
+          return;
+        }
+        const dataUrl = data.dataUrl as string;
+        if (dataUrl) {
+          const mimeMatch = dataUrl.match(/data:(.*?);base64,/);
+          if (mimeMatch) {
+            const mimeType = mimeMatch[1];
+            const base64Data = dataUrl.replace(/data:.*?;base64,/, '');
+            let ext = '.png';
+            if (mimeType.includes('jpeg') || mimeType.includes('jpg')) ext = '.jpg';
+            else if (mimeType.includes('gif')) ext = '.gif';
+            else if (mimeType.includes('webp')) ext = '.webp';
+            else if (mimeType.includes('svg')) ext = '.svg';
+
+            const fileName = `image_${Date.now()}${ext}`;
+            const filePath = `${FileSystem.cacheDirectory}${fileName}`;
+
+            (async () => {
+              try {
+                await FileSystem.writeAsStringAsync(filePath, base64Data, { encoding: 'base64' });
+                await MediaLibrary.saveToLibraryAsync(filePath);
+                Alert.alert('Image Saved', 'Image has been saved to your gallery.');
+              } catch (err) {
+                console.error('Error saving image:', err);
+                Alert.alert('Download Failed', 'Could not save the image to your device.');
+              }
+            })();
+          }
+        }
       } else if (data.type === 'findInPageResult') {
         setFindResultsCount(data.count);
         setFindCurrentIndex(0);
@@ -1272,6 +1555,74 @@ export default function BrowserScreen() {
             sourceUrl: SAFE_SEARCH_HOMEPAGE
           });
         }
+      } else if (data.type === 'blobData') {
+        // Blob download — could be a PDF, image, or other file.
+        console.log('[BlobData] Received blobData message');
+        const dataUrl = data.dataUrl as string;
+        if (dataUrl) {
+          console.log('[BlobData] dataUrl length:', dataUrl.length, 'preview:', dataUrl.substring(0, 80));
+          const mimeMatch = dataUrl.match(/data:(.*?);base64,/);
+          if (mimeMatch) {
+            const mimeType = mimeMatch[1];
+            const base64Data = dataUrl.replace(/data:.*?;base64,/, '');
+            const isImage = mimeType.startsWith('image/');
+            console.log('[BlobData] mimeType:', mimeType, 'isImage:', isImage, 'base64 length:', base64Data.length);
+
+            // Determine file extension
+            let fileExtension = '.bin';
+            if (mimeType.includes('pdf')) fileExtension = '.pdf';
+            else if (mimeType.includes('png')) fileExtension = '.png';
+            else if (mimeType.includes('jpeg') || mimeType.includes('jpg')) fileExtension = '.jpg';
+            else if (mimeType.includes('gif')) fileExtension = '.gif';
+            else if (mimeType.includes('webp')) fileExtension = '.webp';
+            else if (mimeType.includes('text/')) fileExtension = '.txt';
+            else if (isImage) fileExtension = '.png';
+
+            const fileName = `download_${Date.now()}${fileExtension}`;
+            const filePath = `${FileSystem.cacheDirectory}${fileName}`;
+            console.log('[BlobData] Saving to:', filePath, 'extension:', fileExtension);
+
+            (async () => {
+              try {
+                await FileSystem.writeAsStringAsync(filePath, base64Data, { encoding: 'base64' });
+                console.log('[BlobData] File written successfully');
+
+                if (isImage) {
+                  // Save images to the gallery
+                  console.log('[BlobData] Requesting media library permissions...');
+                  const { status } = await MediaLibrary.requestPermissionsAsync();
+                  console.log('[BlobData] Permission status:', status);
+                  if (status === 'granted') {
+                    await MediaLibrary.saveToLibraryAsync(filePath);
+                    console.log('[BlobData] Image saved to gallery successfully');
+                    Alert.alert('Image Saved', 'Image has been saved to your gallery.');
+                  } else {
+                    console.log('[BlobData] Permission denied');
+                    Alert.alert('Permission Required', 'Storage permission is needed to save images.');
+                  }
+                } else {
+                  // Non-image files: save to documents directory
+                  const docPath = `${FileSystem.documentDirectory}${fileName}`;
+                  await FileSystem.copyAsync({ from: filePath, to: docPath });
+                  console.log('[BlobData] Non-image file saved to:', docPath);
+                  Alert.alert('Download Complete', 'File has been downloaded successfully.');
+                }
+              } catch (error) {
+                console.error('[BlobData] Error saving blob data:', error);
+                Alert.alert('Download Failed', 'Could not save the file to your device.');
+              }
+            })();
+          } else {
+            // Fallback to original method if data URL format is unexpected
+            Linking.openURL(dataUrl).catch(() => {
+              Alert.alert(
+                'Download',
+                'The file is too large to open directly. You can take a screenshot to save it.',
+                [{ text: 'OK' }]
+              );
+            });
+          }
+        }
       } else if (data.type === 'consoleLog') {
         // Forwarded console log from WebView
         const prefix = `[WebView ${data.level.toUpperCase()}]`;
@@ -1283,8 +1634,10 @@ export default function BrowserScreen() {
           console.log(prefix, data.message, data.url ? `(${data.url})` : '');
         }
       }
-    } catch { }
-  }, [headerVisible, lastScrollY, showLinkContextMenu, showWebsiteNotification, getActiveTab, activeTabId, updateTab]);
+    } catch (error) {
+      console.error('Error in WebView message handler:', error);
+    }
+  }, [headerVisible, lastScrollY, showLinkContextMenu, showImageContextMenu, showWebsiteNotification, getActiveTab, activeTabId, updateTab]);
 
   // Helper to check if a Google URL is authorized (Exact match OR Same Query)
   const checkGoogleUrlAuthorization = useCallback((targetUrl: string) => {
@@ -1889,6 +2242,9 @@ export default function BrowserScreen() {
 
   // State to track blocked URLs with timestamps to prevent multiple processing
   const blockedUrls = useRef<Map<string, number>>(new Map());
+
+  // Debounce for blob URL handling (sites often fire multiple window.open calls)
+  const blobHandledRef = useRef(false);
 
   // State to track the last valid URL to go back to when blocking deep links
   const lastValidUrl = useRef<string>('https://mbasic.facebook.com');
@@ -2612,6 +2968,7 @@ export default function BrowserScreen() {
       }
       // For new sites (undefined) and allowed sites (true), allow navigation
     }
+
 
     return true;
   }, [extractOrigin, saveSitePermissions, getActiveTab, activeTabId, updateTab, setForceNavCounter, processUrl, convertDeepLinkToWebUrl, shouldBlockDeepLinkLoop, webViewRef]);
@@ -3976,7 +4333,7 @@ export default function BrowserScreen() {
             />
           </View>
 
-          {appAvailable && !referringApp ? (
+          {appAvailable ? (
             <Pressable
               onPress={handleOpenInApp}
               style={({ pressed }) => [
@@ -4109,47 +4466,6 @@ export default function BrowserScreen() {
           </ThemedView>
         )}
 
-        {referringApp && appAvailable && (
-          <View style={[
-            styles.referringAppBannerContainer,
-            { backgroundColor: theme.primary + '20', borderBottomColor: theme.primary }
-          ]}>
-            <View style={styles.referringAppBannerContent}>
-              <Feather name="link-2" size={14} color={theme.primary} />
-              <ThemedText style={{ fontSize: 12, color: theme.text }}>
-                Opened from {referringApp}
-              </ThemedText>
-            </View>
-            <Pressable
-              onPress={handleOpenInApp}
-              style={({ pressed }) => [
-                styles.referringAppActionButton,
-                { backgroundColor: theme.primary },
-                pressed && styles.buttonPressed,
-              ]}
-            >
-              <ThemedText style={{ fontSize: 11, fontWeight: '600', color: theme.surface }}>
-                {appAvailable.name}
-              </ThemedText>
-            </Pressable>
-          </View>
-        )}
-
-        {referringApp && !appAvailable && (
-          <Pressable
-            onPress={clearReferringApp}
-            style={[
-              styles.referringAppBanner,
-              { backgroundColor: theme.primary + '20', borderBottomColor: theme.primary },
-            ]}
-          >
-            <Feather name="link-2" size={14} color={theme.primary} style={{ marginRight: 8 }} />
-            <ThemedText style={{ fontSize: 12, color: theme.primary }}>
-              Opened from {referringApp}
-            </ThemedText>
-          </Pressable>
-        )}
-
         {isSubreddit && showSubredditSearchModal && (
           <Pressable
             style={styles.subredditSearchOverlay}
@@ -4246,6 +4562,48 @@ export default function BrowserScreen() {
                 ]}
               >
                 <ThemedText style={styles.linkContextMenuButtonText}>Copy Link</ThemedText>
+              </Pressable>
+
+            </View>
+          </Pressable>
+        )}
+
+        {imageContextMenu && Platform.OS !== 'ios' && (
+          <Pressable
+            style={styles.linkContextMenuOverlay}
+            onPress={() => setImageContextMenu(null)}
+          >
+            <View style={[styles.linkContextMenuBox, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+              <ThemedText style={[styles.linkContextMenuTitle, { color: theme.textSecondary }]}>
+                {imageContextMenu.alt || 'Image'}
+              </ThemedText>
+
+              <Pressable
+                onPress={() => {
+                  setImageContextMenu(null);
+                  handleImageDownload(imageContextMenu.url);
+                }}
+                style={({ pressed }) => [
+                  styles.linkContextMenuButton,
+                  { borderBottomColor: theme.border },
+                  pressed && styles.linkContextMenuButtonPressed,
+                ]}
+              >
+                <ThemedText style={styles.linkContextMenuButtonText}>Save Image</ThemedText>
+              </Pressable>
+
+              <Pressable
+                onPress={() => {
+                  setImageContextMenu(null);
+                  Clipboard.setStringAsync(imageContextMenu.url);
+                }}
+                style={({ pressed }) => [
+                  styles.linkContextMenuButton,
+                  { borderBottomColor: theme.border },
+                  pressed && styles.linkContextMenuButtonPressed,
+                ]}
+              >
+                <ThemedText style={styles.linkContextMenuButtonText}>Copy Image URL</ThemedText>
               </Pressable>
 
             </View>
@@ -4853,7 +5211,7 @@ export default function BrowserScreen() {
                   }
                 })();
               ` + (skipHeavyScripts ? DEBUG_CONSOLE_PROXY_JS + scrollTrackingJS : injectedJS) + (!skipHeavyScripts && tabIsYouTube ? youtubeFixJS : '') + (!skipHeavyScripts && tabIsReddit ? REDDIT_NSFW_FILTER_JS : '') + (!skipHeavyScripts && tabIsGoogle ? GOOGLE_SAFESEARCH_SUPPRESSION_JS + GOOGLE_SECTIONS_BLOCK_JS : '')}
-                injectedJavaScriptBeforeContentLoaded={skipHeavyScripts ? DEBUG_CONSOLE_PROXY_JS : (facebookDeepLinkPreventionJS + mediaFilterPreloadJS + (tabIsYouTube ? youtubePreloadJS + ';' + youtubeFixJS : '') + (tabIsReddit ? REDDIT_EARLY_CSS_JS : '') + (tabIsGoogle ? GOOGLE_SAFESEARCH_SUPPRESSION_JS + GOOGLE_SECTIONS_BLOCK_JS : '') + getPermissionBlockingScript(currentHostname))}
+                injectedJavaScriptBeforeContentLoaded={skipHeavyScripts ? DEBUG_CONSOLE_PROXY_JS : (blobDownloadInterceptJS + facebookDeepLinkPreventionJS + mediaFilterPreloadJS + (tabIsYouTube ? youtubePreloadJS + ';' + youtubeFixJS : '') + (tabIsReddit ? REDDIT_EARLY_CSS_JS : '') + (tabIsGoogle ? GOOGLE_SAFESEARCH_SUPPRESSION_JS + GOOGLE_SECTIONS_BLOCK_JS : '') + getPermissionBlockingScript(currentHostname))}
                 key={`${tab.id}-${permissionCounter}-${forceNavCounter}`}
                 originWhitelist={['*']}
                 allowsBackForwardNavigationGestures
@@ -4878,10 +5236,118 @@ export default function BrowserScreen() {
                     // Open in new tab to simulate popup and preserve main page context
                     createTab(targetUrl);
                   } else if (webViewRef.current && targetUrl) {
-                    console.log('  Redirecting current tab to popup URL');
-                    // For other popups, use JS injection
-                    const jsCode = `window.location.href = "${targetUrl}";`;
-                    webViewRef.current.injectJavaScript(jsCode);
+                    if (targetUrl.startsWith('blob:')) {
+                      // Debounce: only process one blob URL at a time (sites often fire multiple)
+                      if (blobHandledRef.current) return;
+                      blobHandledRef.current = true;
+                      setTimeout(() => { blobHandledRef.current = false; }, 3000);
+
+                      console.log('  [Blob] Detected blob URL, rendering PDF inline via pdf.js');
+                      // Blob URLs are bound to the page that created them. Android WebView
+                      // cannot render PDFs and its DownloadManager only handles HTTP/HTTPS.
+                      // Solution: fetch the blob in-page, load pdf.js from CDN, and render
+                      // each page as a canvas element directly in the WebView.
+                      const blobJs = `
+                        (async function() {
+                          try {
+                            // 1. Fetch the blob while still in the originating page context
+                            var resp = await fetch("${targetUrl}");
+                            var arrayBuffer = await resp.arrayBuffer();
+
+                            // 2. Load pdf.js from CDN
+                            await new Promise(function(resolve, reject) {
+                              var s = document.createElement('script');
+                              s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+                              s.onload = resolve;
+                              s.onerror = reject;
+                              document.head.appendChild(s);
+                            });
+                            pdfjsLib.GlobalWorkerOptions.workerSrc =
+                              'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+                            // 3. Parse the PDF
+                            var pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+                            // 4. Replace page content with a PDF viewer
+                            document.body.innerHTML = '';
+                            document.body.style.cssText = 'margin:0;padding:0;background:#525659;overflow:auto;display:flex;flex-direction:column;align-items:center;';
+                            document.title = 'PDF (' + pdf.numPages + ' pages)';
+
+                            // Store arrayBuffer for download
+                            window.__pdfArrayBuffer = arrayBuffer;
+
+                            // Download button toolbar
+                            var toolbar = document.createElement('div');
+                            toolbar.style.cssText = 'position:sticky;top:0;z-index:10;width:100%;display:flex;justify-content:center;padding:8px;background:#3a3a3a;gap:12px;';
+                            var dlBtn = document.createElement('button');
+                            dlBtn.textContent = 'Download PDF';
+                            dlBtn.style.cssText = 'padding:8px 20px;border:none;border-radius:6px;background:#4A90D9;color:white;font-size:14px;font-weight:600;cursor:pointer;';
+                            dlBtn.onclick = function() {
+                              try {
+                                var blob = new Blob([window.__pdfArrayBuffer], { type: 'application/pdf' });
+                                var reader = new FileReader();
+                                reader.onloadend = function() {
+                                  if (window.ReactNativeWebView) {
+                                    window.ReactNativeWebView.postMessage(JSON.stringify({
+                                      type: 'blobData',
+                                      dataUrl: reader.result
+                                    }));
+                                  }
+                                };
+                                reader.readAsDataURL(blob);
+                              } catch(e) { console.log('[PDF] Download failed:', e); }
+                            };
+                            toolbar.appendChild(dlBtn);
+                            var pageInfo = document.createElement('span');
+                            pageInfo.style.cssText = 'color:#ccc;font-size:13px;align-self:center;';
+                            pageInfo.textContent = pdf.numPages + ' page' + (pdf.numPages > 1 ? 's' : '');
+                            toolbar.appendChild(pageInfo);
+                            document.body.appendChild(toolbar);
+
+                            // Render pages at native resolution for sharpness
+                            var dpr = window.devicePixelRatio || 1;
+                            var cssWidth = window.innerWidth - 16;
+
+                            for (var i = 1; i <= pdf.numPages; i++) {
+                              var page = await pdf.getPage(i);
+                              // Scale so PDF fills the screen width
+                              var baseScale = cssWidth / page.getViewport({ scale: 1 }).width;
+                              var hiResScale = baseScale * dpr;
+                              var viewport = page.getViewport({ scale: hiResScale });
+                              var canvas = document.createElement('canvas');
+                              canvas.width = viewport.width;
+                              canvas.height = viewport.height;
+                              // CSS size = logical pixels; canvas size = physical pixels
+                              canvas.style.cssText = 'display:block;margin:8px auto;background:white;width:' + cssWidth + 'px;height:' + Math.round(viewport.height / dpr) + 'px;';
+                              document.body.appendChild(canvas);
+                              await page.render({ canvasContext: canvas.getContext('2d'), viewport: viewport }).promise;
+                            }
+                          } catch(e) {
+                            console.log('[Blob/PDF] Failed to render:', e);
+                            document.body.innerHTML = '<div style="color:white;text-align:center;padding:40px;font-family:sans-serif;">' +
+                              '<h3>Could not display PDF</h3>' +
+                              '<p style="opacity:0.7;">Try opening this page in your system browser.</p></div>';
+                          }
+                        })();
+                        true;
+                      `;
+                      
+                      // Create a new tab with the same URL as the current page to maintain the origin
+                      // This allows the blob URL to be accessed from the new tab
+                      const currentUrl = activeTab?.url || 'https://safesearchengine.com/';
+                      createTab(currentUrl);
+                      
+                      // After a brief delay to allow the new tab to be created and become active,
+                      // inject the blob handling script into the current WebView (which will be the new tab's WebView)
+                      setTimeout(() => {
+                        webViewRef.current?.injectJavaScript(blobJs);
+                      }, 150);
+                    } else {
+                      console.log('  Redirecting current tab to popup URL');
+                      // For other popups, use JS injection
+                      const jsCode = `window.location.href = "${targetUrl}";`;
+                      webViewRef.current.injectJavaScript(jsCode);
+                    }
                   }
                 }}
                 allowsInlineMediaPlayback
@@ -4909,6 +5375,63 @@ export default function BrowserScreen() {
                   }
 
                   const url = event.nativeEvent.downloadUrl;
+                  console.log('[onFileDownload] Triggered, url:', url);
+
+                  // Handle blob: URLs - DownloadManager only supports HTTP/HTTPS
+                  // Use the stored __blobMap from the preload intercept (avoids CSP/fetch issues)
+                  if (url && url.startsWith('blob:')) {
+                    console.log('[onFileDownload] Blob URL detected, injecting JS to read blob');
+                    const blobDownloadJs = `
+                      (function() {
+                        console.log('[onFileDownload-JS] Looking for blob in __blobMap, keys:', Object.keys(window.__blobMap || {}).length);
+                        var blob = window.__blobMap && window.__blobMap["${url.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"];
+                        console.log('[onFileDownload-JS] Blob found:', !!blob, blob ? ('type:' + blob.type + ' size:' + blob.size) : 'N/A');
+                        if (blob) {
+                          var reader = new FileReader();
+                          reader.onloadend = function() {
+                            console.log('[onFileDownload-JS] FileReader done, result length:', reader.result ? reader.result.length : 0);
+                            if (window.ReactNativeWebView) {
+                              window.ReactNativeWebView.postMessage(JSON.stringify({
+                                type: 'blobData',
+                                dataUrl: reader.result
+                              }));
+                              console.log('[onFileDownload-JS] blobData message sent');
+                            }
+                          };
+                          reader.onerror = function() {
+                            console.log('[onFileDownload-JS] FileReader error:', reader.error);
+                          };
+                          reader.readAsDataURL(blob);
+                        } else {
+                          // Fallback: try fetch (works when CSP allows it)
+                          console.log('[onFileDownload-JS] Falling back to fetch');
+                          fetch("${url.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}").then(function(r) {
+                            console.log('[onFileDownload-JS] Fetch response:', r.status, r.type);
+                            return r.blob();
+                          }).then(function(b) {
+                            console.log('[onFileDownload-JS] Fetch blob:', b.type, b.size);
+                            var reader = new FileReader();
+                            reader.onloadend = function() {
+                              if (window.ReactNativeWebView) {
+                                window.ReactNativeWebView.postMessage(JSON.stringify({
+                                  type: 'blobData',
+                                  dataUrl: reader.result
+                                }));
+                                console.log('[onFileDownload-JS] blobData message sent via fetch fallback');
+                              }
+                            };
+                            reader.readAsDataURL(b);
+                          }).catch(function(e) {
+                            console.log('[onFileDownload-JS] Fetch failed:', e.message || e);
+                          });
+                        }
+                      })();
+                      true;
+                    `;
+                    webViewRef.current?.injectJavaScript(blobDownloadJs);
+                    return;
+                  }
+
                   let hostname = 'unknown';
                   try {
                     hostname = new URL(url).hostname;
@@ -5246,35 +5769,6 @@ const styles = StyleSheet.create({
   },
   progressBar: {
     height: '100%',
-  },
-  referringAppBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: Spacing.xs,
-    borderBottomWidth: 1,
-    marginTop: HEADER_HEIGHT,
-  },
-  referringAppBannerContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: Spacing.xs,
-    borderBottomWidth: 1,
-    marginTop: HEADER_HEIGHT,
-    gap: Spacing.sm,
-  },
-  referringAppBannerContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    gap: 8,
-  },
-  referringAppActionButton: {
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: 6,
-    borderRadius: 4,
   },
   webViewContainer: {
     flex: 1,
