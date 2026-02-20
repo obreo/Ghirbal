@@ -79,7 +79,7 @@ import {
 } from '@/lib/search_engine_restrictions';
 import { isYouTubeAlwaysRestrictedEnabled } from '@/lib/app-config';
 
-const DEBUG_CONSOLE_PROXY_JS = `
+const DEBUG_CONSOLE_PROXY_JS = __DEV__ ? `
 (function() {
   var oldLog = console.log;
   var oldWarn = console.warn;
@@ -116,7 +116,51 @@ const DEBUG_CONSOLE_PROXY_JS = `
     sendLog('error', ['[Unhandled Promise]', e.reason]);
   });
 })();
-`;
+` : '';
+
+// --- Download Content Type Validation ---
+// Blocklist of dangerous MIME types that should never be processed as downloads
+const BLOCKED_DOWNLOAD_MIME_TYPES = [
+  'application/x-msdownload',        // .exe, .dll
+  'application/x-executable',        // Linux executables
+  'application/vnd.android.package-archive', // .apk
+  'application/x-msdos-program',     // .com, .bat
+  'application/x-sh',                // Shell scripts
+  'application/x-httpd-php',         // PHP
+  'text/html',                       // HTML (could contain scripts)
+  'application/xhtml+xml',           // XHTML
+  'application/javascript',          // JavaScript
+  'text/javascript',                 // JavaScript
+  'application/x-javascript',        // JavaScript
+];
+
+// Allowlist of safe MIME types for general blob/file downloads
+const ALLOWED_DOWNLOAD_MIME_TYPES = new Set([
+  // Images
+  'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp',
+  'image/bmp', 'image/tiff', 'image/svg+xml',
+  // Documents
+  'application/pdf',
+  'text/plain', 'text/csv',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  // Archives
+  'application/zip', 'application/x-zip-compressed',
+  'application/x-rar-compressed', 'application/x-7z-compressed',
+  // Audio/Video
+  'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4',
+  'video/mp4', 'video/webm', 'video/ogg', 'video/mpeg',
+  // Data
+  'application/json', 'application/xml', 'text/xml',
+]);
+
+const ALLOWED_IMAGE_MIME_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp', 'image/bmp',
+]);
 
 type BrowserScreenNavigationProp = NativeStackNavigationProp<RootStackParamList, 'Main'>;
 
@@ -168,7 +212,7 @@ const getAppSchemeForUrl = (url: string): { scheme: string; name: string; deepLi
     }
     return null;
   } catch (error) {
-    console.log('Error parsing URL:', url, error);
+    if (__DEV__) console.log('Error parsing URL:', url, error);
     return null;
   }
 };
@@ -249,14 +293,16 @@ export default function BrowserScreen() {
   // Initialize previousUrlRef when active tab changes
   useEffect(() => {
     const activeTab = getActiveTab();
-    console.log('[previousUrlRef Init] Active tab changed');
-    console.log('  Active Tab ID:', activeTabId);
-    console.log('  Active Tab URL:', activeTab?.url);
+    if (__DEV__) {
+      console.log('[previousUrlRef Init] Active tab changed');
+      console.log('  Active Tab ID:', activeTabId);
+      console.log('  Active Tab URL:', activeTab?.url);
+    }
     if (activeTab && activeTab.url) {
       previousUrlRef.current = activeTab.url;
-      console.log('  ✓ Set previousUrlRef to:', activeTab.url);
+      if (__DEV__) console.log('  ✓ Set previousUrlRef to:', activeTab.url);
     } else {
-      console.log('  ⚠️ No URL to set');
+      if (__DEV__) console.log('  ⚠️ No URL to set');
     }
   }, [activeTabId, getActiveTab]);
 
@@ -517,13 +563,13 @@ export default function BrowserScreen() {
       try {
         hostname = new URL(url).hostname;
       } catch {
-        console.log('Error parsing URL for notification:', url);
+        if (__DEV__) console.log('Error parsing URL for notification:', url);
         return;
       }
 
       // Check if notifications are allowed for this site
       if (!allowedNotificationsSites.has(hostname)) {
-        console.log(`[Notification] Blocked notification from ${hostname} - not enabled`);
+        if (__DEV__) console.log(`[Notification] Blocked notification from ${hostname} - not enabled`);
         return;
       }
 
@@ -535,7 +581,7 @@ export default function BrowserScreen() {
         finalStatus = status;
       }
       if (finalStatus !== 'granted') {
-        console.log('Notification permissions not granted');
+        if (__DEV__) console.log('Notification permissions not granted');
         return;
       }
 
@@ -565,10 +611,10 @@ export default function BrowserScreen() {
           const PermissionsModule = NativeModules.PermissionsModule;
           if (PermissionsModule && typeof PermissionsModule.checkPermissions === 'function') {
             const result = await PermissionsModule.checkPermissions();
-            console.log('📋 System Permissions Status:', result);
+            if (__DEV__) console.log('📋 System Permissions Status:', result);
             setSystemPermissionsGranted(result);
           } else {
-            console.log('ℹ️ Permissions check: Module not available, assuming default state');
+            if (__DEV__) console.log('ℹ️ Permissions check: Module not available, assuming default state');
             setSystemPermissionsGranted({
               camera: false,
               microphone: false,
@@ -578,7 +624,7 @@ export default function BrowserScreen() {
             });
           }
         } catch (error) {
-          console.log('Permission check error:', error);
+          if (__DEV__) console.log('Permission check error:', error);
         }
       };
 
@@ -864,6 +910,15 @@ export default function BrowserScreen() {
           var blob = __blobMap[this.href];
           console.log('[BlobIntercept] Blob found in map:', !!blob, blob ? ('type:' + blob.type + ' size:' + blob.size) : 'N/A');
           if (blob) {
+            // Validate blob content type against blocklist
+            var blockedTypes = ${JSON.stringify(BLOCKED_DOWNLOAD_MIME_TYPES)};
+            var blobType = (blob.type || '').toLowerCase();
+            for (var i = 0; i < blockedTypes.length; i++) {
+              if (blobType === blockedTypes[i]) {
+                console.log('[BlobIntercept] BLOCKED dangerous type:', blobType);
+                return; // Don't process, don't fall through to origClick
+              }
+            }
             var reader = new FileReader();
             reader.onloadend = function() {
               console.log('[BlobIntercept] FileReader done, dataUrl length:', reader.result ? reader.result.length : 0);
@@ -1204,11 +1259,21 @@ export default function BrowserScreen() {
     }
 
     if (imageUrl.startsWith('blob:') || imageUrl.startsWith('data:')) {
+      // Validate data: URL MIME type is actually an image
+      if (imageUrl.startsWith('data:')) {
+        const mimeMatch = imageUrl.match(/^data:([^;,]+)/);
+        const mime = mimeMatch ? mimeMatch[1].toLowerCase() : '';
+        if (mime && !ALLOWED_IMAGE_MIME_TYPES.has(mime)) {
+          Alert.alert('Invalid Image', 'The file type is not a supported image format.');
+          return;
+        }
+      }
       // For blob/data URLs, use JS injection since they're page-context-bound
       const js = `
         (async function() {
           try {
-            var resp = await fetch("${imageUrl.replace(/"/g, '\\"')}");
+            var imageUrl = ${JSON.stringify(imageUrl)};
+            var resp = await fetch(imageUrl);
             var blob = await resp.blob();
             var reader = new FileReader();
             reader.onloadend = function() {
@@ -1254,11 +1319,19 @@ export default function BrowserScreen() {
           },
         });
 
-        console.log('[ImageDownload] Status:', result.status, 'CT:', result.headers?.['content-type']);
+        if (__DEV__) console.log('[ImageDownload] Status:', result.status, 'CT:', result.headers?.['content-type']);
 
         if (result.status === 200) {
+          // Validate Content-Type is actually an image
+          const ct = (result.headers?.['content-type'] || '').toLowerCase().split(';')[0].trim();
+          if (ct && !ct.startsWith('image/')) {
+            // Server returned non-image content — reject to prevent saving malicious files
+            if (__DEV__) console.log('[ImageDownload] Rejected non-image content-type:', ct);
+            try { await FileSystem.deleteAsync(filePath, { idempotent: true }); } catch {}
+            Alert.alert('Invalid Image', 'The downloaded file is not a supported image format.');
+            return;
+          }
           // Check if Content-Type differs from our extension
-          const ct = (result.headers?.['content-type'] || '').toLowerCase();
           if (ct && ct.startsWith('image/')) {
             let correctExt = ext;
             if (ct.includes('png')) correctExt = '.png';
@@ -1278,11 +1351,12 @@ export default function BrowserScreen() {
           Alert.alert('Image Saved', 'Image has been saved to your gallery.');
         } else {
           // Direct download failed (403, etc.) — fall back to fetching via WebView context
-          console.log('[ImageDownload] Direct download failed, falling back to WebView fetch');
+          if (__DEV__) console.log('[ImageDownload] Direct download failed, falling back to WebView fetch');
           const js = `
             (async function() {
               try {
-                var resp = await fetch("${imageUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}");
+                var imageUrl = ${JSON.stringify(imageUrl)};
+                var resp = await fetch(imageUrl);
                 var blob = await resp.blob();
                 var reader = new FileReader();
                 reader.onloadend = function() {
@@ -1338,13 +1412,15 @@ export default function BrowserScreen() {
 
     const targetUrl = getUrlOrSearch(input);
 
-    console.log('[handleUrlSubmit] Input:', input);
-    console.log('[handleUrlSubmit] Target URL:', targetUrl);
+    if (__DEV__) {
+      console.log('[handleUrlSubmit] Input:', input);
+      console.log('[handleUrlSubmit] Target URL:', targetUrl);
+    }
 
     // Check if trying to access Google directly from URL bar
     // BUT allow Google auth/OAuth URLs without restriction
     if (isGoogleSearchDomain(targetUrl) && !isGoogleAuthUrl(targetUrl)) {
-      console.log('[handleUrlSubmit] ❌ Direct Google access from URL bar - redirecting to SafeSearch');
+      if (__DEV__) console.log('[handleUrlSubmit] ❌ Direct Google access from URL bar - redirecting to SafeSearch');
       previousUrlRef.current = null;
       if (activeTabId) {
         updateTab(activeTabId, {
@@ -1358,7 +1434,7 @@ export default function BrowserScreen() {
     }
 
     // Clear previous URL (no referrer for URL bar input)
-    console.log('[handleUrlSubmit] Clearing previousUrlRef for URL bar input');
+    if (__DEV__) console.log('[handleUrlSubmit] Clearing previousUrlRef for URL bar input');
     previousUrlRef.current = null;
 
     const result = processUrl(targetUrl, 'navigation');
@@ -1434,7 +1510,13 @@ export default function BrowserScreen() {
         if (dataUrl) {
           const mimeMatch = dataUrl.match(/data:(.*?);base64,/);
           if (mimeMatch) {
-            const mimeType = mimeMatch[1];
+            const mimeType = mimeMatch[1].toLowerCase();
+            // Validate MIME type is actually an image
+            if (!mimeType.startsWith('image/')) {
+              if (__DEV__) console.log('[imageDownloadData] Rejected non-image MIME:', mimeType);
+              Alert.alert('Invalid Image', 'The downloaded file is not a supported image format.');
+              return;
+            }
             const base64Data = dataUrl.replace(/data:.*?;base64,/, '');
             let ext = '.png';
             if (mimeType.includes('jpeg') || mimeType.includes('jpg')) ext = '.jpg';
@@ -1474,11 +1556,11 @@ export default function BrowserScreen() {
         // Website is requesting notification permission
         // Permission is already checked in onPermissionRequest handler
         // This is just for logging
-        console.log(`[Notification] Permission request from ${data.hostname}`);
+        if (__DEV__) console.log(`[Notification] Permission request from ${data.hostname}`);
       } else if (data.type === 'permissionBlocked') {
         // A website tried to access a permission API and was blocked by JS
         // This is a backup block, main block is in onPermissionRequest
-        console.log(`[Permission] Blocked ${data.permission} for ${data.hostname}`);
+        if (__DEV__) console.log(`[Permission] Blocked ${data.permission} for ${data.hostname}`);
 
         // Only show alert if we haven't shown one recently (debounce)
         // (For simplicity we just show it, but in production we might want to debounce)
@@ -1525,10 +1607,10 @@ export default function BrowserScreen() {
         );
       } else if (data.type === 'permissionGatekeeperCheck') {
         // Just a log or pre-check. The actual blocking happens at onPermissionRequest.
-        console.log(`[Gatekeeper] Page pre-checked ${data.permission}`);
+        if (__DEV__) console.log(`[Gatekeeper] Page pre-checked ${data.permission}`);
       } else if (data.type === 'permissionBlockingActive') {
         // Confirmation that permission blocking script is active
-        console.log(`[Permission] Blocking active for ${data.hostname}:`, {
+        if (__DEV__) console.log(`[Permission] Blocking active for ${data.hostname}:`, {
           micCamera: data.micCameraAllowed ? 'ALLOWED' : 'BLOCKED',
           gps: data.gpsAllowed ? 'ALLOWED' : 'BLOCKED',
           notifications: data.notificationsAllowed ? 'ALLOWED' : 'BLOCKED'
@@ -1541,14 +1623,14 @@ export default function BrowserScreen() {
         }));
       } else if (data.type === 'pageLoadStart') {
         // Page load started
-        console.log(`[Page] Load started for ${data.hostname}`);
+        if (__DEV__) console.log(`[Page] Load started for ${data.hostname}`);
       } else if (data.type === 'shortsBlocked') {
         // YouTube shorts navigation was blocked by injected JS
-        console.log(`[YouTube] Shorts blocked: ${data.url}`);
+        if (__DEV__) console.log(`[YouTube] Shorts blocked: ${data.url}`);
         // Optional: show a brief toast/message (the JS already blocks the navigation)
       } else if (data.type === 'blockedGoogleSection') {
         // Google Images/Videos/Shorts section was accessed - redirect to safesearchengine
-        console.log(`[Google] Blocked section accessed: ${data.url}`);
+        if (__DEV__) console.log(`[Google] Blocked section accessed: ${data.url}`);
         if (activeTabId) {
           updateTab(activeTabId, {
             url: SAFE_SEARCH_HOMEPAGE,
@@ -1557,16 +1639,22 @@ export default function BrowserScreen() {
         }
       } else if (data.type === 'blobData') {
         // Blob download — could be a PDF, image, or other file.
-        console.log('[BlobData] Received blobData message');
+        if (__DEV__) console.log('[BlobData] Received blobData message');
         const dataUrl = data.dataUrl as string;
         if (dataUrl) {
-          console.log('[BlobData] dataUrl length:', dataUrl.length, 'preview:', dataUrl.substring(0, 80));
+          if (__DEV__) console.log('[BlobData] dataUrl length:', dataUrl.length, 'preview:', dataUrl.substring(0, 80));
           const mimeMatch = dataUrl.match(/data:(.*?);base64,/);
           if (mimeMatch) {
-            const mimeType = mimeMatch[1];
+            const mimeType = mimeMatch[1].toLowerCase();
+            // Validate MIME type against allowlist
+            if (!ALLOWED_DOWNLOAD_MIME_TYPES.has(mimeType)) {
+              if (__DEV__) console.log('[BlobData] Rejected disallowed MIME type:', mimeType);
+              Alert.alert('Download Blocked', 'This file type is not supported for download.');
+              return;
+            }
             const base64Data = dataUrl.replace(/data:.*?;base64,/, '');
             const isImage = mimeType.startsWith('image/');
-            console.log('[BlobData] mimeType:', mimeType, 'isImage:', isImage, 'base64 length:', base64Data.length);
+            if (__DEV__) console.log('[BlobData] mimeType:', mimeType, 'isImage:', isImage, 'base64 length:', base64Data.length);
 
             // Determine file extension
             let fileExtension = '.bin';
@@ -1580,31 +1668,31 @@ export default function BrowserScreen() {
 
             const fileName = `download_${Date.now()}${fileExtension}`;
             const filePath = `${FileSystem.cacheDirectory}${fileName}`;
-            console.log('[BlobData] Saving to:', filePath, 'extension:', fileExtension);
+            if (__DEV__) console.log('[BlobData] Saving to:', filePath, 'extension:', fileExtension);
 
             (async () => {
               try {
                 await FileSystem.writeAsStringAsync(filePath, base64Data, { encoding: 'base64' });
-                console.log('[BlobData] File written successfully');
+                if (__DEV__) console.log('[BlobData] File written successfully');
 
                 if (isImage) {
                   // Save images to the gallery
-                  console.log('[BlobData] Requesting media library permissions...');
+                  if (__DEV__) console.log('[BlobData] Requesting media library permissions...');
                   const { status } = await MediaLibrary.requestPermissionsAsync();
-                  console.log('[BlobData] Permission status:', status);
+                  if (__DEV__) console.log('[BlobData] Permission status:', status);
                   if (status === 'granted') {
                     await MediaLibrary.saveToLibraryAsync(filePath);
-                    console.log('[BlobData] Image saved to gallery successfully');
+                    if (__DEV__) console.log('[BlobData] Image saved to gallery successfully');
                     Alert.alert('Image Saved', 'Image has been saved to your gallery.');
                   } else {
-                    console.log('[BlobData] Permission denied');
+                    if (__DEV__) console.log('[BlobData] Permission denied');
                     Alert.alert('Permission Required', 'Storage permission is needed to save images.');
                   }
                 } else {
                   // Non-image files: save to documents directory
                   const docPath = `${FileSystem.documentDirectory}${fileName}`;
                   await FileSystem.copyAsync({ from: filePath, to: docPath });
-                  console.log('[BlobData] Non-image file saved to:', docPath);
+                  if (__DEV__) console.log('[BlobData] Non-image file saved to:', docPath);
                   Alert.alert('Download Complete', 'File has been downloaded successfully.');
                 }
               } catch (error) {
@@ -1625,13 +1713,15 @@ export default function BrowserScreen() {
         }
       } else if (data.type === 'consoleLog') {
         // Forwarded console log from WebView
-        const prefix = `[WebView ${data.level.toUpperCase()}]`;
-        if (data.level === 'error') {
-          console.error(prefix, data.message, data.url ? `(${data.url})` : '');
-        } else if (data.level === 'warn') {
-          console.warn(prefix, data.message, data.url ? `(${data.url})` : '');
-        } else {
-          console.log(prefix, data.message, data.url ? `(${data.url})` : '');
+        if (__DEV__) {
+          const prefix = `[WebView ${data.level.toUpperCase()}]`;
+          if (data.level === 'error') {
+            console.error(prefix, data.message, data.url ? `(${data.url})` : '');
+          } else if (data.level === 'warn') {
+            console.warn(prefix, data.message, data.url ? `(${data.url})` : '');
+          } else {
+            console.log(prefix, data.message, data.url ? `(${data.url})` : '');
+          }
         }
       }
     } catch (error) {
@@ -1672,18 +1762,18 @@ export default function BrowserScreen() {
     if (navState.url.startsWith('fb://')) {
       // Check if this URL was already blocked to prevent multiple processing
       if (blockedUrls.current.has(navState.url)) {
-        console.log('Skipping already blocked fb:// URL in navigation state change:', navState.url);
+        if (__DEV__) console.log('Skipping already blocked fb:// URL in navigation state change:', navState.url);
         return; // Don't process this navigation state change
       }
 
       // Check if we just blocked this URL in onShouldStartLoadWithRequest to avoid duplicate handling
       if (justBlockedUrl.current) {
-        console.log('Already handled fb:// URL in onShouldStartLoadWithRequest, skipping navigation state change:', navState.url);
+        if (__DEV__) console.log('Already handled fb:// URL in onShouldStartLoadWithRequest, skipping navigation state change:', navState.url);
         justBlockedUrl.current = false; // Reset the flag
         return;
       }
 
-      console.log('Blocking fb:// URL in navigation state change:', navState.url);
+      if (__DEV__) console.log('Blocking fb:// URL in navigation state change:', navState.url);
       // Track this URL as blocked to prevent multiple processing
       blockedUrls.current.set(navState.url, Date.now());
 
@@ -1704,7 +1794,7 @@ export default function BrowserScreen() {
     // Check Google access - must come from safesearchengine.com
     // BUT always allow Google auth/OAuth URLs
     if (isGoogleAuthUrl(navState.url)) {
-      console.log('[Google Auth Check] NavigationStateChange: ALLOWING auth URL:', navState.url);
+      if (__DEV__) console.log('[Google Auth Check] NavigationStateChange: ALLOWING auth URL:', navState.url);
     }
 
     // Get current page URL as referrer (where we're navigating FROM)
@@ -1717,24 +1807,26 @@ export default function BrowserScreen() {
 
     if (isGoogleSearchDomain(navState.url) && !isGoogleAuthUrl(navState.url) && !isFromGoogleAuth) {
 
-      console.log('[Google Access Check - NavigationStateChange]');
-      console.log('  Target URL:', navState.url);
-      console.log('  Active Tab URL:', activeTab?.url);
-      console.log('  previousUrlRef:', previousUrlRef.current);
-      console.log('  Current Referrer:', currentReferrer);
+      if (__DEV__) {
+        console.log('[Google Access Check - NavigationStateChange]');
+        console.log('  Target URL:', navState.url);
+        console.log('  Active Tab URL:', activeTab?.url);
+        console.log('  previousUrlRef:', previousUrlRef.current);
+        console.log('  Current Referrer:', currentReferrer);
+      }
 
       // If we're already ON Google OR coming from ANY Google domain (including auth), allow all Google navigations
       // This is critical for OAuth flows where accounts.google.com redirects to google.com
       const isFromGoogleDomain = currentReferrer && currentReferrer.includes('google.com');
       const alreadyOnGoogle = currentReferrer && (isGoogleSearchDomain(currentReferrer) || isGoogleAuthUrl(currentReferrer) || isFromGoogleDomain);
-      console.log('  Already on Google?', alreadyOnGoogle);
+      if (__DEV__) console.log('  Already on Google?', alreadyOnGoogle);
 
       const isHomepage = isGoogleHomePage(navState.url);
       const isAuthorized = checkGoogleUrlAuthorization(navState.url);
 
       // 1. BLOCK HOMEPAGE ALWAYS (unless auth flow)
       if (isHomepage) {
-        console.log('  ❌ BLOCKING: Google Homepage accessed -> Redirecting to SafeSearch');
+        if (__DEV__) console.log('  ❌ BLOCKING: Google Homepage accessed -> Redirecting to SafeSearch');
         previousUrlRef.current = null;
         updateTab(activeTabId, {
           url: SAFE_SEARCH_HOMEPAGE,
@@ -1746,7 +1838,7 @@ export default function BrowserScreen() {
 
       // 2. CHECK FOR BLOCKED GOOGLE SECTIONS - AND STOP IF BLOCKED (No Redirect)
       if (isBlockedGoogleSection(navState.url)) {
-        console.log('  ❌ BLOCKING: Restricted Google Section (Images/Videos/Shorts)');
+        if (__DEV__) console.log('  ❌ BLOCKING: Restricted Google Section (Images/Videos/Shorts)');
         // Stop loading immediately - do not redirect
         webViewRef.current?.stopLoading();
         return;
@@ -1756,7 +1848,7 @@ export default function BrowserScreen() {
       // Ensure "safe=active" is present if we are on a search result page
       const enforcedUrl = enforceGoogleSafeSearch(navState.url);
       if (enforcedUrl !== navState.url) {
-        console.log('  ⚠️ Enforcing SafeSearch: Redirecting to safe URL');
+        if (__DEV__) console.log('  ⚠️ Enforcing SafeSearch: Redirecting to safe URL');
         // We only redirect if we need to add ?safe=active, which preserves the user's intended destination
         updateTab(activeTabId, { url: enforcedUrl, sourceUrl: enforcedUrl });
         return;
@@ -1764,12 +1856,12 @@ export default function BrowserScreen() {
 
       // 4. CHECK AUTHORIZATION (SafeSearch Referrer OR Already On Google OR Session Memory)
       if (alreadyOnGoogle || isReferrerFromSafeSearch(currentReferrer) || isAuthorized) {
-        console.log('  ✓ ALLOWING: Authorized Google Access');
+        if (__DEV__) console.log('  ✓ ALLOWING: Authorized Google Access');
         // Add to authorized list for future "Back" actions
         authorizedGoogleUrls.current.add(navState.url);
       } else {
         // Not from safesearchengine - redirect
-        console.log('  ❌ BLOCKING: Referrer is NOT from safesearchengine.com');
+        if (__DEV__) console.log('  ❌ BLOCKING: Referrer is NOT from safesearchengine.com');
         previousUrlRef.current = null;
         updateTab(activeTabId, {
           url: SAFE_SEARCH_HOMEPAGE,
@@ -1796,7 +1888,7 @@ export default function BrowserScreen() {
     }
 
     // Update previous URL for next navigation's referrer check (MUST be after all checks)
-    console.log('[previousUrlRef Update] Setting to:', navState.url);
+    if (__DEV__) console.log('[previousUrlRef Update] Setting to:', navState.url);
     previousUrlRef.current = navState.url;
 
     updateTab(activeTabId, {
@@ -1861,9 +1953,9 @@ export default function BrowserScreen() {
 
           webViewRef.current.injectJavaScript(`
             (function() {
-              const hostname = '${hostname}';
-              const micCameraAllowed = ${micCameraAllowed};
-              const gpsAllowed = ${gpsAllowed};
+              const hostname = ${JSON.stringify(hostname)};
+              const micCameraAllowed = ${JSON.stringify(Boolean(micCameraAllowed))};
+              const gpsAllowed = ${JSON.stringify(Boolean(gpsAllowed))};
 
               // Quick blocking for immediate protection
               if (!micCameraAllowed && navigator.mediaDevices) {
@@ -1886,7 +1978,7 @@ export default function BrowserScreen() {
             if (window.ReactNativeWebView) {
               window.ReactNativeWebView.postMessage(JSON.stringify({
                 type: 'pageLoadStart',
-                hostname: '${hostname}'
+                hostname: ${JSON.stringify(hostname)}
               }));
             }
 
@@ -2198,7 +2290,7 @@ export default function BrowserScreen() {
       if (!isAuthUrl && (!micCameraAllowed || !gpsAllowed || !storageAllowed || !notificationsAllowed || !imagesAllowed)) {
         const blockingScript = `
           (function() {
-            console.log('[ABrowser] Re-enforcing permission blocks for ${hostname}');
+            console.log('[ABrowser] Re-enforcing permission blocks for ' + ${JSON.stringify(hostname)});
             ${!micCameraAllowed ? `
               if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
                 navigator.mediaDevices.getUserMedia = function() {
@@ -2542,7 +2634,7 @@ export default function BrowserScreen() {
 
     // If a similar deep link pattern was attempted in the last 3 seconds, block it to prevent loops
     if (now - lastAttempt < 3000) {
-      console.log('Blocking potential deep link loop for pattern:', urlPattern);
+      if (__DEV__) console.log('Blocking potential deep link loop for pattern:', urlPattern);
       return true;
     }
 
@@ -2686,7 +2778,7 @@ export default function BrowserScreen() {
 
     // Specifically block fb:// deep links to prevent errors
     if (url.startsWith('fb://')) {
-      console.log('Blocking fb:// deep link:', url);
+      if (__DEV__) console.log('Blocking fb:// deep link:', url);
       // Track this URL as blocked to prevent multiple processing
       blockedUrls.current.set(url, Date.now());
 
@@ -2762,14 +2854,14 @@ export default function BrowserScreen() {
     if (specialSchemes.includes(scheme)) {
       // Check if this is a repeated deep link attempt that might cause a loop
       if (shouldBlockDeepLinkLoop(url)) {
-        console.log('Deep link loop prevented for:', url);
+        if (__DEV__) console.log('Deep link loop prevented for:', url);
         return false;
       }
 
       // Synchronous deep link handling - convert to web URL immediately
       const webUrl = convertDeepLinkToWebUrl(url);
       if (webUrl) {
-        console.log('Converting deep link to web URL:', url, '->', webUrl);
+        if (__DEV__) console.log('Converting deep link to web URL:', url, '->', webUrl);
         // Process the web URL through our content filter
         const result = processUrl(webUrl, 'navigation');
         if (!result.blocked) {
@@ -2781,7 +2873,7 @@ export default function BrowserScreen() {
           // Also inject JavaScript to force navigation to the web URL
           setTimeout(() => {
             if (webViewRef.current) {
-              const jsCode = `window.location.href = '${result.url}'; true;`;
+              const jsCode = `window.location.href = ${JSON.stringify(result.url)}; true;`;
               webViewRef.current.injectJavaScript(jsCode);
             }
           }, 100); // Small delay to ensure the navigation is processed
@@ -2795,10 +2887,10 @@ export default function BrowserScreen() {
           .then(supported => {
             if (supported) {
               Linking.openURL(url).catch(err => {
-                console.log('Error opening external app:', url, err);
+                if (__DEV__) console.log('Error opening external app:', url, err);
               });
             } else {
-              console.log('No app found to handle URL and no web fallback available:', url);
+              if (__DEV__) console.log('No app found to handle URL and no web fallback available:', url);
               // If no app can handle it and no web fallback, try to go back to previous page
               setTimeout(() => {
                 if (webViewRef.current && webViewRef.current.canGoBack()) {
@@ -2811,7 +2903,7 @@ export default function BrowserScreen() {
             }
           })
           .catch(err => {
-            console.log('Error checking if URL can be opened:', url, err);
+            if (__DEV__) console.log('Error checking if URL can be opened:', url, err);
             // If there's an error checking the URL, reload to clear the error state
             setTimeout(() => {
               webViewRef.current?.reload();
@@ -2839,27 +2931,31 @@ export default function BrowserScreen() {
 
     if (isGoogleSearchDomain(url) && !isGoogleAuthUrl(url) && !isFromGoogleAuth) {
 
-      console.log('[Google Access Check - ShouldStartLoad]');
-      console.log('  Target URL:', url);
-      console.log('  Active Tab URL:', activeTab?.url);
-      console.log('  previousUrlRef:', previousUrlRef.current);
-      console.log('  Current Referrer:', currentReferrer);
+      if (__DEV__) {
+        console.log('[Google Access Check - ShouldStartLoad]');
+        console.log('  Target URL:', url);
+        console.log('  Active Tab URL:', activeTab?.url);
+        console.log('  previousUrlRef:', previousUrlRef.current);
+        console.log('  Current Referrer:', currentReferrer);
+      }
 
       // If we're already ON Google OR coming from ANY Google domain (including auth), allow all Google navigations
       // This is critical for OAuth flows where accounts.google.com redirects to google.com
       const isFromGoogleDomain = currentReferrer && currentReferrer.includes('google.com');
       const alreadyOnGoogle = currentReferrer && (isGoogleSearchDomain(currentReferrer) || isGoogleAuthUrl(currentReferrer) || isFromGoogleDomain);
-      console.log('  Already on Google?', alreadyOnGoogle);
+      if (__DEV__) console.log('  Already on Google?', alreadyOnGoogle);
 
       const isHomepage = isGoogleHomePage(url);
       const isAuthorized = checkGoogleUrlAuthorization(url);
 
-      console.log('  isHomepage:', isHomepage);
-      console.log('  isAuthorized:', isAuthorized);
+      if (__DEV__) {
+        console.log('  isHomepage:', isHomepage);
+        console.log('  isAuthorized:', isAuthorized);
+      }
 
       // 1. BLOCK HOMEPAGE ALWAYS (unless auth flow)
       if (isHomepage) {
-        console.log('  ❌ BLOCKING: Google Homepage accessed -> Redirecting to SafeSearch');
+        if (__DEV__) console.log('  ❌ BLOCKING: Google Homepage accessed -> Redirecting to SafeSearch');
         if (activeTabId) {
           updateTab(activeTabId, {
             url: SAFE_SEARCH_HOMEPAGE,
@@ -2872,11 +2968,11 @@ export default function BrowserScreen() {
 
       // 2. CHECK AUTHORIZATION (SafeSearch Referrer OR Already On Google OR Session Memory)
       if (alreadyOnGoogle || isReferrerFromSafeSearch(currentReferrer) || isAuthorized) {
-        console.log('  ✓ ALLOWING: Authorized Google Access');
+        if (__DEV__) console.log('  ✓ ALLOWING: Authorized Google Access');
         // Add to authorized list for future "Back" actions
         authorizedGoogleUrls.current.add(url);
       } else {
-        console.log('  ❌ BLOCKING: Referrer is NOT from safesearchengine.com');
+        if (__DEV__) console.log('  ❌ BLOCKING: Referrer is NOT from safesearchengine.com');
         // Not from safesearchengine - redirect
         if (activeTabId) {
           updateTab(activeTabId, {
@@ -2891,7 +2987,7 @@ export default function BrowserScreen() {
 
     // Block Google Images/Videos/Shorts sections
     if (isBlockedGoogleSection(url)) {
-      console.log('[Google] Blocked section accessed (Navigation blocked):', url);
+      if (__DEV__) console.log('[Google] Blocked section accessed (Navigation blocked):', url);
       // HIDE AND BLOCK strategy: Just return false, do not redirect.
       // This effectively makes the link unclickable if the CSS hiding failed/was delayed.
       return false;
@@ -3623,7 +3719,7 @@ export default function BrowserScreen() {
       // If it fails, the catch block handles it.
       await Linking.openURL(appAvailable.deepLink);
     } catch (error) {
-      console.log('Failed to open app deep link directly, trying fallback or alerting:', error);
+      if (__DEV__) console.log('Failed to open app deep link directly, trying fallback or alerting:', error);
 
       Alert.alert(
         'App Not Detected',
@@ -3648,9 +3744,11 @@ export default function BrowserScreen() {
   useEffect(() => {
     if (activeTab?.url) {
       const app = getAppSchemeForUrl(activeTab.url);
-      console.log('URL:', activeTab.url);
-      console.log('App found:', app);
-      console.log('Platform.OS:', Platform.OS);
+      if (__DEV__) {
+        console.log('URL:', activeTab.url);
+        console.log('App found:', app);
+        console.log('Platform.OS:', Platform.OS);
+      }
       if (app && Platform.OS !== 'web') {
         // Show the button for known apps regardless of whether they're installed
         // This gives users the option to install the app
@@ -4200,7 +4298,7 @@ export default function BrowserScreen() {
       images: imagesAllowed
     };
 
-    console.log('[Gatekeeper] Syncing permissions to WebView:', permissions);
+    if (__DEV__) console.log('[Gatekeeper] Syncing permissions to WebView:', permissions);
 
     webViewRef.current?.injectJavaScript(`
       if (window.__gatekeeperPermissions) {
@@ -5035,7 +5133,7 @@ export default function BrowserScreen() {
                 onShouldStartLoadWithRequest={(request: any) => {
                   if (tab.id === activeTabId) {
                     if (isGoogleAuthUrl(request.url)) {
-                      console.log('[Google Auth Check] onShouldStartLoadWithRequest: ALLOWING auth URL:', request.url);
+                      if (__DEV__) console.log('[Google Auth Check] onShouldStartLoadWithRequest: ALLOWING auth URL:', request.url);
                     }
                     return handleShouldStartLoadWithRequest(request);
                   }
@@ -5055,7 +5153,7 @@ export default function BrowserScreen() {
                       try {
                         requestHostname = new URL(requestUrl).hostname;
                       } catch (e) {
-                        console.log('Error parsing permission origin:', requestUrl);
+                        if (__DEV__) console.log('Error parsing permission origin:', requestUrl);
                       }
 
                       // Normalize hostname for consistent matching
@@ -5063,7 +5161,7 @@ export default function BrowserScreen() {
 
                       // Get requested resources - standardizing input
                       const resources = request.resources || (request.getResources ? request.getResources() : []);
-                      console.log(`[Gatekeeper] Request from ${requestHostname} (normalized: ${normalizedHostname}):`, resources);
+                      if (__DEV__) console.log(`[Gatekeeper] Request from ${requestHostname} (normalized: ${normalizedHostname}):`, resources);
 
                       // Use REFS to get latest permission values
                       const micCameraAllowed = allowedMicCameraSitesRef.current.has(normalizedHostname);
@@ -5083,7 +5181,7 @@ export default function BrowserScreen() {
                             permissionsToGrant.push(resource);
                           } else {
                             deniedAny = true;
-                            console.log(`[Gatekeeper] BLOCKED: ${resource} for ${requestHostname} - mic/camera toggle OFF`);
+                            if (__DEV__) console.log(`[Gatekeeper] BLOCKED: ${resource} for ${requestHostname} - mic/camera toggle OFF`);
                           }
                         } else if (resource === 'notifications') {
                           // Notifications often handled via different channel, but if they come here:
@@ -5091,7 +5189,7 @@ export default function BrowserScreen() {
                             permissionsToGrant.push(resource);
                           } else {
                             deniedAny = true;
-                            console.log(`[Gatekeeper] BLOCKED: ${resource} for ${requestHostname} - notifications toggle OFF`);
+                            if (__DEV__) console.log(`[Gatekeeper] BLOCKED: ${resource} for ${requestHostname} - notifications toggle OFF`);
                           }
                         }
                         else if (resource === 'geolocation') {
@@ -5099,7 +5197,7 @@ export default function BrowserScreen() {
                             permissionsToGrant.push(resource);
                           } else {
                             deniedAny = true;
-                            console.log(`[Gatekeeper] BLOCKED: ${resource} for ${requestHostname} - GPS toggle OFF`);
+                            if (__DEV__) console.log(`[Gatekeeper] BLOCKED: ${resource} for ${requestHostname} - GPS toggle OFF`);
                           }
                         }
                         else if (resource === 'android.webkit.resource.PROTECTED_MEDIA_ID' || resource === 'protected_media_id') {
@@ -5109,13 +5207,13 @@ export default function BrowserScreen() {
                         else {
                           // Unknown resource type - deny by default
                           deniedAny = true;
-                          console.log(`[Gatekeeper] BLOCKED: Unknown resource ${resource} for ${requestHostname}`);
+                          if (__DEV__) console.log(`[Gatekeeper] BLOCKED: Unknown resource ${resource} for ${requestHostname}`);
                         }
                       });
 
                       if (deniedAny) {
                         // If we are blocking something, we deny the whole request (standard security practice)
-                        console.log(`[Gatekeeper] Denying request from ${requestHostname}. Toggles: MicCam=${micCameraAllowed}, GPS=${gpsAllowed}`);
+                        if (__DEV__) console.log(`[Gatekeeper] Denying request from ${requestHostname}. Toggles: MicCam=${micCameraAllowed}, GPS=${gpsAllowed}`);
                         request.deny();
 
                         // Notify user WHY it failed
@@ -5130,7 +5228,7 @@ export default function BrowserScreen() {
                         }
                       } else {
                         // All requested permissions are allowed by policy
-                        console.log(`[Gatekeeper] Granting access to ${requestHostname}:`, permissionsToGrant);
+                        if (__DEV__) console.log(`[Gatekeeper] Granting access to ${requestHostname}:`, permissionsToGrant);
                         request.grant(permissionsToGrant);
                       }
                     } catch (error) {
@@ -5222,7 +5320,7 @@ export default function BrowserScreen() {
                 javaScriptCanOpenWindowsAutomatically={true}
                 onOpenWindow={(syntheticEvent: any) => {
                   const { targetUrl } = syntheticEvent.nativeEvent;
-                  console.log('[NavDebug] onOpenWindow triggered:', targetUrl);
+                  if (__DEV__) console.log('[NavDebug] onOpenWindow triggered:', targetUrl);
 
                   // Check if this is a Google OAuth popup - these need special handling
                   const isGoogleAuthPopup = targetUrl && (
@@ -5232,7 +5330,7 @@ export default function BrowserScreen() {
                   );
 
                   if (isGoogleAuthPopup) {
-                    console.log('  [OAuth] Detected Google auth popup, opening new tab');
+                    if (__DEV__) console.log('  [OAuth] Detected Google auth popup, opening new tab');
                     // Open in new tab to simulate popup and preserve main page context
                     createTab(targetUrl);
                   } else if (webViewRef.current && targetUrl) {
@@ -5242,7 +5340,7 @@ export default function BrowserScreen() {
                       blobHandledRef.current = true;
                       setTimeout(() => { blobHandledRef.current = false; }, 3000);
 
-                      console.log('  [Blob] Detected blob URL, rendering PDF inline via pdf.js');
+                      if (__DEV__) console.log('  [Blob] Detected blob URL, rendering PDF inline via pdf.js');
                       // Blob URLs are bound to the page that created them. Android WebView
                       // cannot render PDFs and its DownloadManager only handles HTTP/HTTPS.
                       // Solution: fetch the blob in-page, load pdf.js from CDN, and render
@@ -5251,7 +5349,16 @@ export default function BrowserScreen() {
                         (async function() {
                           try {
                             // 1. Fetch the blob while still in the originating page context
-                            var resp = await fetch("${targetUrl}");
+                            var targetUrl = ${JSON.stringify(targetUrl)};
+                            var resp = await fetch(targetUrl);
+                            // Validate content type before processing
+                            var ct = (resp.headers.get('content-type') || '').toLowerCase();
+                            var blockedTypes = ${JSON.stringify(BLOCKED_DOWNLOAD_MIME_TYPES)};
+                            for (var i = 0; i < blockedTypes.length; i++) {
+                              if (ct.indexOf(blockedTypes[i]) !== -1) {
+                                throw new Error('Blocked content type: ' + ct);
+                              }
+                            }
                             var arrayBuffer = await resp.arrayBuffer();
 
                             // 2. Load pdf.js from CDN
@@ -5343,9 +5450,9 @@ export default function BrowserScreen() {
                         webViewRef.current?.injectJavaScript(blobJs);
                       }, 150);
                     } else {
-                      console.log('  Redirecting current tab to popup URL');
+                      if (__DEV__) console.log('  Redirecting current tab to popup URL');
                       // For other popups, use JS injection
-                      const jsCode = `window.location.href = "${targetUrl}";`;
+                      const jsCode = `window.location.href = ${JSON.stringify(targetUrl)}; true;`;
                       webViewRef.current.injectJavaScript(jsCode);
                     }
                   }
@@ -5375,18 +5482,28 @@ export default function BrowserScreen() {
                   }
 
                   const url = event.nativeEvent.downloadUrl;
-                  console.log('[onFileDownload] Triggered, url:', url);
+                  if (__DEV__) console.log('[onFileDownload] Triggered, url:', url);
 
                   // Handle blob: URLs - DownloadManager only supports HTTP/HTTPS
                   // Use the stored __blobMap from the preload intercept (avoids CSP/fetch issues)
                   if (url && url.startsWith('blob:')) {
-                    console.log('[onFileDownload] Blob URL detected, injecting JS to read blob');
+                    if (__DEV__) console.log('[onFileDownload] Blob URL detected, injecting JS to read blob');
                     const blobDownloadJs = `
                       (function() {
+                        var blobUrl = ${JSON.stringify(url)};
                         console.log('[onFileDownload-JS] Looking for blob in __blobMap, keys:', Object.keys(window.__blobMap || {}).length);
-                        var blob = window.__blobMap && window.__blobMap["${url.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"];
+                        var blob = window.__blobMap && window.__blobMap[blobUrl];
                         console.log('[onFileDownload-JS] Blob found:', !!blob, blob ? ('type:' + blob.type + ' size:' + blob.size) : 'N/A');
                         if (blob) {
+                          // Validate blob content type against blocklist
+                          var blockedTypes = ${JSON.stringify(BLOCKED_DOWNLOAD_MIME_TYPES)};
+                          var blobType = (blob.type || '').toLowerCase();
+                          for (var bi = 0; bi < blockedTypes.length; bi++) {
+                            if (blobType === blockedTypes[bi]) {
+                              console.log('[onFileDownload-JS] BLOCKED dangerous type:', blobType);
+                              return;
+                            }
+                          }
                           var reader = new FileReader();
                           reader.onloadend = function() {
                             console.log('[onFileDownload-JS] FileReader done, result length:', reader.result ? reader.result.length : 0);
@@ -5405,11 +5522,20 @@ export default function BrowserScreen() {
                         } else {
                           // Fallback: try fetch (works when CSP allows it)
                           console.log('[onFileDownload-JS] Falling back to fetch');
-                          fetch("${url.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}").then(function(r) {
+                          fetch(blobUrl).then(function(r) {
                             console.log('[onFileDownload-JS] Fetch response:', r.status, r.type);
                             return r.blob();
                           }).then(function(b) {
                             console.log('[onFileDownload-JS] Fetch blob:', b.type, b.size);
+                            // Validate fetched blob type
+                            var fbType = (b.type || '').toLowerCase();
+                            var fBlockedTypes = ${JSON.stringify(BLOCKED_DOWNLOAD_MIME_TYPES)};
+                            for (var fi = 0; fi < fBlockedTypes.length; fi++) {
+                              if (fbType === fBlockedTypes[fi]) {
+                                console.log('[onFileDownload-JS] BLOCKED dangerous fetch blob type:', fbType);
+                                return;
+                              }
+                            }
                             var reader = new FileReader();
                             reader.onloadend = function() {
                               if (window.ReactNativeWebView) {
@@ -5472,11 +5598,11 @@ export default function BrowserScreen() {
                 }}
                 onReceivedError={(syntheticEvent: any) => {
                   const { nativeEvent } = syntheticEvent;
-                  console.log('[NavDebug] Load Error:', nativeEvent.description, 'URL:', nativeEvent.url, 'Code:', nativeEvent.code);
+                  if (__DEV__) console.log('[NavDebug] Load Error:', nativeEvent.description, 'URL:', nativeEvent.url, 'Code:', nativeEvent.code);
 
                   // Special handling for Facebook deep link errors
                   if (nativeEvent.code === -10 && nativeEvent.description.includes('net::ERR_UNKNOWN_URL_SCHEME') && nativeEvent.url.startsWith('fb://')) {
-                    console.log('Blocking Facebook deep link error:', nativeEvent.url);
+                    if (__DEV__) console.log('Blocking Facebook deep link error:', nativeEvent.url);
                     // Track this URL as blocked to prevent multiple processing
                     blockedUrls.current.set(nativeEvent.url, Date.now());
 
@@ -5491,7 +5617,7 @@ export default function BrowserScreen() {
 
                     // Check if we just blocked this URL elsewhere to avoid duplicate handling
                     if (justBlockedUrl.current) {
-                      console.log('Already handled fb:// URL elsewhere, skipping error handling:', nativeEvent.url);
+                      if (__DEV__) console.log('Already handled fb:// URL elsewhere, skipping error handling:', nativeEvent.url);
                       justBlockedUrl.current = false; // Reset the flag
                       return;
                     }
@@ -5517,7 +5643,7 @@ export default function BrowserScreen() {
                 }}
                 onReceivedHttpError={(syntheticEvent: any) => {
                   const { nativeEvent } = syntheticEvent;
-                  console.log('[NavDebug] HTTP Error:', nativeEvent.description, 'URL:', nativeEvent.url, 'Status:', nativeEvent.statusCode);
+                  if (__DEV__) console.log('[NavDebug] HTTP Error:', nativeEvent.description, 'URL:', nativeEvent.url, 'Status:', nativeEvent.statusCode);
 
                   // Set error state with friendly message for HTTP errors
                   const errorCode = nativeEvent.statusCode;
