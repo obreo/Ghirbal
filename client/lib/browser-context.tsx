@@ -152,10 +152,11 @@ export function BrowserProvider({ children }: { children: React.ReactNode }) {
       if (tabsData) {
         try {
           loadedTabs = JSON.parse(tabsData);
-          // Migrate old tabs to have sourceUrl if missing
+          // On restore, always use the latest url as sourceUrl so the WebView
+          // loads the last page the user was viewing, not the original sourceUrl
           loadedTabs = loadedTabs.map((t: Tab) => ({
             ...t,
-            sourceUrl: t.sourceUrl || t.url // Default to current url if missing
+            sourceUrl: t.url
           }));
 
           if (activeTabData && activeTabData.length > 0 && loadedTabs.find((t: Tab) => t.id === activeTabData)) {

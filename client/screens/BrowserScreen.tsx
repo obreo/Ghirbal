@@ -1801,7 +1801,6 @@ export default function BrowserScreen() {
 
     updateTab(activeTabId, {
       url: navState.url,
-      sourceUrl: navState.url,
       title: navState.title || 'Untitled',
       canGoBack: navState.canGoBack,
       canGoForward: navState.canGoForward,

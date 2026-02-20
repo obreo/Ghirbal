@@ -159,7 +159,8 @@ export const REDDIT_EARLY_CSS_JS = `
     faceplate-search-input,
     shreddit-search-large,
     #expand-search-button,
-    #header-search-bar {
+    #header-search-bar,
+    .search-hero-small {
       display: none !important;
     }
   \`;
@@ -264,6 +265,7 @@ export const REDDIT_NSFW_FILTER_JS = `
         faceplate-search-input,
         shreddit-search-large,
         #header-search-bar,
+        .search-hero-small,
         /* Be specific - only input elements with search placeholder */
         input[placeholder*="Search Reddit"],
         input[placeholder="Search"] {
@@ -284,6 +286,7 @@ export const REDDIT_NSFW_FILTER_JS = `
       'faceplate-search-input',
       'shreddit-search-large',
       '#header-search-bar',
+      '.search-hero-small',
     ];
     
     searchSelectors.forEach(function(selector) {
