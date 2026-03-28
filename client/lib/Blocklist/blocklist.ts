@@ -212037,6 +212037,16 @@ zzzxxx150.cc
 zzzxxx69.cc
 zzzxxxmmm.top
 zzzxxxx33.com
+indusappstore.com
+uptodown.com
+apkpure.com
+aptoid.com
+appbrain.com
+apk20.com
+apkpure.net
+apkcombo.com
+pgyer.com
+captain-droid.com
 `;
 
 // Import blocklist management functions from source files (avoid circular imports)

@@ -339,6 +339,9 @@ export function processUrl(inputUrl: string, context: 'navigation' | 'resource' 
     // It's a non-web scheme (fb://, intent://, whatsapp:// etc.)
     // We allow it to pass through so handleShouldStartLoadWithRequest can deal with it
     return { url, blocked: false };
+  } else if (url.startsWith("http://")) {
+    // Upgrade HTTP to HTTPS to avoid cleartext traffic errors
+    url = url.replace(/^http:\/\//i, "https://");
   }
 
   if (isApkDownload(url)) {

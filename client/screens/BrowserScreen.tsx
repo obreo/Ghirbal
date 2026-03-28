@@ -948,6 +948,150 @@ export default function BrowserScreen() {
     true;
   `;
 
+  // JavaScript to block ALL APK downloads at the page level
+  const apkDownloadBlockJS = `
+    (function() {
+      var APK_EXTENSIONS = ['.apk', '.xapk', '.apkm', '.apkx', '.apks'];
+      var APK_MIME = 'application/vnd.android.package-archive';
+
+      function isApkUrl(url) {
+        if (!url || typeof url !== 'string') return false;
+        var lower = url.toLowerCase().split('?')[0].split('#')[0];
+        for (var i = 0; i < APK_EXTENSIONS.length; i++) {
+          if (lower.endsWith(APK_EXTENSIONS[i])) return true;
+        }
+        // Check query string and path patterns
+        var full = url.toLowerCase();
+        if (full.includes('.apk?') || full.includes('.apk&') || full.includes('/apk/') ||
+            full.includes('download=apk') || full.includes('type=apk') || full.includes('format=apk') ||
+            full.includes('/getapk') || full.includes('/downloadapk') || full.includes('/apk-download') ||
+            full.includes('application/vnd.android.package-archive') ||
+            full.includes('application%2fvnd.android.package-archive')) return true;
+        return false;
+      }
+
+      // 1. Intercept anchor clicks (covers <a href="x.apk"> and <a download>)
+      document.addEventListener('click', function(e) {
+        var el = e.target;
+        while (el && el.tagName !== 'A') el = el.parentElement;
+        if (el && el.href && isApkUrl(el.href)) {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          console.log('[APK Block] Blocked click on APK link:', el.href);
+          if (window.ReactNativeWebView) {
+            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'apkBlocked', url: el.href }));
+          }
+          return false;
+        }
+      }, true);
+
+      // 2. Intercept window.location assignments
+      var origLocationAssign = window.location.assign;
+      var origLocationReplace = window.location.replace;
+      if (origLocationAssign) {
+        window.location.assign = function(url) {
+          if (isApkUrl(url)) { console.log('[APK Block] Blocked location.assign:', url); return; }
+          return origLocationAssign.call(window.location, url);
+        };
+      }
+      if (origLocationReplace) {
+        window.location.replace = function(url) {
+          if (isApkUrl(url)) { console.log('[APK Block] Blocked location.replace:', url); return; }
+          return origLocationReplace.call(window.location, url);
+        };
+      }
+
+      // 3. Intercept window.open
+      var origOpen = window.open;
+      window.open = function(url) {
+        if (isApkUrl(url)) { console.log('[APK Block] Blocked window.open:', url); return null; }
+        return origOpen.apply(window, arguments);
+      };
+
+      // 4. Intercept programmatic anchor clicks
+      var origAnchorClick = HTMLAnchorElement.prototype.click;
+      HTMLAnchorElement.prototype.click = function() {
+        if (this.href && isApkUrl(this.href)) {
+          console.log('[APK Block] Blocked programmatic .click() on APK link:', this.href);
+          return;
+        }
+        return origAnchorClick.call(this);
+      };
+
+      // 5. Intercept createElement to neuter dynamically created APK links
+      var origSetAttribute = Element.prototype.setAttribute;
+      Element.prototype.setAttribute = function(name, value) {
+        if (this.tagName === 'A' && name === 'href' && isApkUrl(value)) {
+          console.log('[APK Block] Blocked setAttribute href to APK:', value);
+          return;
+        }
+        if (this.tagName === 'IFRAME' && name === 'src' && isApkUrl(value)) {
+          console.log('[APK Block] Blocked iframe src to APK:', value);
+          return;
+        }
+        return origSetAttribute.call(this, name, value);
+      };
+
+      // 6. Block APK blob creation
+      var origCreateObjectURL = URL.createObjectURL;
+      URL.createObjectURL = function(obj) {
+        if (obj instanceof Blob && obj.type && obj.type.toLowerCase() === APK_MIME) {
+          console.log('[APK Block] Blocked createObjectURL for APK blob');
+          return 'about:blank';
+        }
+        return origCreateObjectURL.call(this, obj);
+      };
+
+      // 7. MutationObserver to catch any APK links/iframes added to DOM
+      var observer = new MutationObserver(function(mutations) {
+        for (var i = 0; i < mutations.length; i++) {
+          var nodes = mutations[i].addedNodes;
+          for (var j = 0; j < nodes.length; j++) {
+            var node = nodes[j];
+            if (node.nodeType !== 1) continue;
+            // Check the node itself
+            if (node.tagName === 'A' && node.href && isApkUrl(node.href)) {
+              node.removeAttribute('href');
+              node.removeAttribute('download');
+              node.style.pointerEvents = 'none';
+            }
+            if (node.tagName === 'IFRAME' && node.src && isApkUrl(node.src)) {
+              node.removeAttribute('src');
+            }
+            // Check children
+            if (node.querySelectorAll) {
+              var links = node.querySelectorAll('a[href]');
+              for (var k = 0; k < links.length; k++) {
+                if (isApkUrl(links[k].href)) {
+                  links[k].removeAttribute('href');
+                  links[k].removeAttribute('download');
+                  links[k].style.pointerEvents = 'none';
+                }
+              }
+              var iframes = node.querySelectorAll('iframe[src]');
+              for (var m = 0; m < iframes.length; m++) {
+                if (isApkUrl(iframes[m].src)) {
+                  iframes[m].removeAttribute('src');
+                }
+              }
+            }
+          }
+        }
+      });
+
+      if (document.documentElement) {
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+      } else {
+        document.addEventListener('DOMContentLoaded', function() {
+          observer.observe(document.documentElement, { childList: true, subtree: true });
+        });
+      }
+
+      console.log('[APK Block] APK download blocking initialized');
+    })();
+    true;
+  `;
+
   // JavaScript to prevent Facebook from initiating deep link redirects
   const facebookDeepLinkPreventionJS = `
     (function() {
@@ -1637,6 +1781,8 @@ export default function BrowserScreen() {
             sourceUrl: SAFE_SEARCH_HOMEPAGE
           });
         }
+      } else if (data.type === 'apkBlocked') {
+        Alert.alert('Download Blocked', 'APK downloads are not allowed for security reasons.');
       } else if (data.type === 'blobData') {
         // Blob download — could be a PDF, image, or other file.
         if (__DEV__) console.log('[BlobData] Received blobData message');
@@ -2511,7 +2657,33 @@ export default function BrowserScreen() {
         }
       }
 
-      // Add more deep link conversions as needed
+      // Generic fallback: convert appname:// to https://appname.com/
+      // Covers aliexpress://, snapchat://, tiktok://, amazon://, etc.
+      const genericMatch = url.match(/^([a-z][a-z0-9]*):\/\/(.*)$/i);
+      if (genericMatch) {
+        const appName = genericMatch[1].toLowerCase();
+        const path = genericMatch[2].split('?')[0];
+        // Map common app scheme names to their web domains
+        const domainMap: Record<string, string> = {
+          aliexpress: 'www.aliexpress.com',
+          amazon: 'www.amazon.com',
+          snapchat: 'www.snapchat.com',
+          tiktok: 'www.tiktok.com',
+          telegram: 'web.telegram.org',
+          linkedin: 'www.linkedin.com',
+          pinterest: 'www.pinterest.com',
+          reddit: 'www.reddit.com',
+          spotify: 'open.spotify.com',
+          youtube: 'www.youtube.com',
+          twitch: 'www.twitch.tv',
+          discord: 'discord.com',
+          ebay: 'www.ebay.com',
+          temu: 'www.temu.com',
+          shein: 'www.shein.com',
+        };
+        const domain = domainMap[appName] || `www.${appName}.com`;
+        return `https://${domain}/${path}`;
+      }
 
       return null;
     } catch (error) {
@@ -2776,6 +2948,17 @@ export default function BrowserScreen() {
   const handleShouldStartLoadWithRequest = useCallback((request: { url: string }) => {
     const { url } = request;
 
+    // Upgrade HTTP to HTTPS to avoid cleartext traffic errors
+    if (url.startsWith('http://')) {
+      const httpsUrl = url.replace(/^http:\/\//i, 'https://');
+      console.log('[HTTP→HTTPS] Upgrading:', url, '->', httpsUrl);
+      if (activeTabId) {
+        updateTab(activeTabId, { url: httpsUrl, sourceUrl: httpsUrl });
+        setForceNavCounter(c => c + 1);
+      }
+      return false;
+    }
+
     // Specifically block fb:// deep links to prevent errors
     if (url.startsWith('fb://')) {
       if (__DEV__) console.log('Blocking fb:// deep link:', url);
@@ -2839,19 +3022,17 @@ export default function BrowserScreen() {
       return false; // Prevent the original deep link from loading
     }
 
-    // Update the last valid URL if this is not a deep link
-    if (!url.startsWith('fb://') &&
-        !url.startsWith('about:blank') &&
-        !url.startsWith('data:') &&
-        !url.startsWith('javascript:')) {
+    // Update the last valid URL only for web URLs
+    if (url.startsWith('http://') || url.startsWith('https://')) {
       lastValidUrl.current = url;
     }
 
-    // Handle special schemes and intents
+    // Handle ALL non-web schemes (deep links, intents, app links)
+    // Instead of maintaining a list, block any scheme that isn't http/https/blob/data/javascript/about
     const scheme = url.split(':')[0].toLowerCase();
-    const specialSchemes = ['intent', 'market', 'tel', 'mailto', 'sms', 'geo', 'whatsapp', 'fb', 'facebook', 'sfbfi'];
+    const allowedSchemes = ['http', 'https', 'blob', 'data', 'javascript', 'about'];
 
-    if (specialSchemes.includes(scheme)) {
+    if (!allowedSchemes.includes(scheme)) {
       // Check if this is a repeated deep link attempt that might cause a loop
       if (shouldBlockDeepLinkLoop(url)) {
         if (__DEV__) console.log('Deep link loop prevented for:', url);
@@ -5309,7 +5490,7 @@ export default function BrowserScreen() {
                   }
                 })();
               ` + (skipHeavyScripts ? DEBUG_CONSOLE_PROXY_JS + scrollTrackingJS : injectedJS) + (!skipHeavyScripts && tabIsYouTube ? youtubeFixJS : '') + (!skipHeavyScripts && tabIsReddit ? REDDIT_NSFW_FILTER_JS : '') + (!skipHeavyScripts && tabIsGoogle ? GOOGLE_SAFESEARCH_SUPPRESSION_JS + GOOGLE_SECTIONS_BLOCK_JS : '')}
-                injectedJavaScriptBeforeContentLoaded={skipHeavyScripts ? DEBUG_CONSOLE_PROXY_JS : (blobDownloadInterceptJS + facebookDeepLinkPreventionJS + mediaFilterPreloadJS + (tabIsYouTube ? youtubePreloadJS + ';' + youtubeFixJS : '') + (tabIsReddit ? REDDIT_EARLY_CSS_JS : '') + (tabIsGoogle ? GOOGLE_SAFESEARCH_SUPPRESSION_JS + GOOGLE_SECTIONS_BLOCK_JS : '') + getPermissionBlockingScript(currentHostname))}
+                injectedJavaScriptBeforeContentLoaded={skipHeavyScripts ? DEBUG_CONSOLE_PROXY_JS : (apkDownloadBlockJS + blobDownloadInterceptJS + facebookDeepLinkPreventionJS + mediaFilterPreloadJS + (tabIsYouTube ? youtubePreloadJS + ';' + youtubeFixJS : '') + (tabIsReddit ? REDDIT_EARLY_CSS_JS : '') + (tabIsGoogle ? GOOGLE_SAFESEARCH_SUPPRESSION_JS + GOOGLE_SECTIONS_BLOCK_JS : '') + getPermissionBlockingScript(currentHostname))}
                 key={`${tab.id}-${permissionCounter}-${forceNavCounter}`}
                 originWhitelist={['*']}
                 allowsBackForwardNavigationGestures
@@ -5628,6 +5809,17 @@ export default function BrowserScreen() {
                     // Simply block the deep link without navigation - JavaScript should prevent the redirect
                     // The page will remain on the current valid page
                     justBlockedUrl.current = false; // Reset the flag immediately
+                    return;
+                  }
+
+                  // If cleartext (HTTP) error, retry with HTTPS
+                  if (nativeEvent.description && nativeEvent.description.includes('ERR_CLEARTEXT_NOT_PERMITTED') && nativeEvent.url && nativeEvent.url.startsWith('http://')) {
+                    const httpsUrl = nativeEvent.url.replace(/^http:\/\//i, 'https://');
+                    console.log('[HTTP→HTTPS] Cleartext error, retrying with HTTPS:', httpsUrl);
+                    if (activeTabId) {
+                      updateTab(activeTabId, { url: httpsUrl, sourceUrl: httpsUrl });
+                      setForceNavCounter(c => c + 1);
+                    }
                     return;
                   }
 
