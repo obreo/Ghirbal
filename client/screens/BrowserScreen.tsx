@@ -2469,7 +2469,7 @@ export default function BrowserScreen() {
         detectPermissionUsage(hostname);
       }, 500);
     }
-  }, [loadingProgress, pendingCacheClear, acknowledgeCacheClear, activeTab, normalizeHostname, detectPermissionUsage, hasError, setHasError, setErrorMessage, setErrorDetails, justBlockedUrl]);
+  }, [loadingProgress, pendingCacheClear, acknowledgeCacheClear, activeTab, normalizeHostname, detectPermissionUsage, hasError, setHasError, setErrorMessage, setErrorDetails]);
 
   const handleLoadProgress = useCallback(({ nativeEvent }: { nativeEvent: { progress: number } }) => {
     loadingProgress.value = nativeEvent.progress;
@@ -3099,6 +3099,38 @@ export default function BrowserScreen() {
       return false;
     }
 
+    // === PDF DOWNLOAD ===
+    // Android WebView cannot render PDFs — intercept and download instead
+    const urlPathLower = url.toLowerCase().split('?')[0].split('#')[0];
+    if (urlPathLower.endsWith('.pdf')) {
+      let pdfHostname = 'unknown';
+      try { pdfHostname = normalizeHostname(new URL(url).hostname); } catch { }
+
+      if (allowedStorageSitesRef.current.has(pdfHostname)) {
+        Linking.openURL(url);
+      } else {
+        Alert.alert(
+          'Download PDF',
+          `Allow ${pdfHostname} to save files to your device?`,
+          [
+            { text: 'Deny', style: 'cancel' },
+            {
+              text: 'Allow',
+              onPress: () => {
+                const newSites = new Set(allowedStorageSites);
+                newSites.add(pdfHostname);
+                setAllowedStorageSites(newSites);
+                allowedStorageSitesRef.current = newSites;
+                askToRemember('storage', pdfHostname);
+                Linking.openURL(url);
+              }
+            }
+          ]
+        );
+      }
+      return false;
+    }
+
     // === GOOGLE ACCESS CHECK ===
     // Google is only allowed if referrer is safesearchengine.com
     // BUT always allow Google auth/OAuth URLs without restriction
@@ -3248,7 +3280,7 @@ export default function BrowserScreen() {
 
 
     return true;
-  }, [extractOrigin, saveSitePermissions, getActiveTab, activeTabId, updateTab, setForceNavCounter, processUrl, convertDeepLinkToWebUrl, shouldBlockDeepLinkLoop, webViewRef]);
+  }, [extractOrigin, saveSitePermissions, getActiveTab, activeTabId, updateTab, setForceNavCounter, processUrl, convertDeepLinkToWebUrl, shouldBlockDeepLinkLoop, webViewRef, allowedStorageSites, setAllowedStorageSites, askToRemember, normalizeHostname]);
 
   const handleGoBack = useCallback(() => {
     webViewRef.current?.goBack();
@@ -3983,50 +4015,40 @@ export default function BrowserScreen() {
   const alwaysRestricted = isYouTubeAlwaysRestrictedEnabled();
   const youtubePreloadJS = `
     (function() {
-      console.log('[YT Preload] Setting PREF cookie IMMEDIATELY');
-      console.log('[YT Preload] URL:', window.location.href);
-      console.log('[YT Preload] Cookies before:', document.cookie);
+      // ===== DARK MODE =====
+      // Modern YouTube stores dark mode in localStorage under yt-user-preferences.
+      // We set it here (before content loads) so YouTube picks it up on first render.
+      try {
+        var prefs = {};
+        try { prefs = JSON.parse(localStorage.getItem('yt-user-preferences') || '{}'); } catch(e) {}
+        if (!prefs.colorPreference || prefs.colorPreference.darkMode !== true) {
+          prefs.colorPreference = { darkMode: true };
+          localStorage.setItem('yt-user-preferences', JSON.stringify(prefs));
+        }
+      } catch(e) {}
 
-      // Config: always restricted mode
+      // Force dark attribute on <html> immediately so there's no light-flash
+      try {
+        document.documentElement.setAttribute('dark', '');
+        document.documentElement.setAttribute('system-icons', 'default');
+      } catch(e) {}
+
+      // ===== PREF COOKIE (restricted mode + legacy dark flag) =====
       var alwaysRestricted = ${alwaysRestricted};
       var isVideoPage = window.location.pathname.includes('/watch');
-
-      var targetPref;
-      // If alwaysRestricted=true, always include f2=8000000 (even on video pages)
-      // If alwaysRestricted=false, only include f2=8000000 on non-video pages (allows comments)
       var shouldUseRestricted = alwaysRestricted ? true : !isVideoPage;
-      
-      if (shouldUseRestricted) {
-        // Force f2=8000000 (restricted mode)
-        targetPref = 'f6=40000000&tz=Asia.Karachi&f5=30000&f7=100&f4=4000000&f2=8000000';
-        console.log('[YT Preload] Setting PREF WITH f2=8000000 (restricted mode)');
-      } else {
-        // No f2=8000000 (comments visible)
-        targetPref = 'f6=40000000&tz=Asia.Karachi&f5=30000&f7=100&f4=4000000';
-        console.log('[YT Preload] Setting PREF WITHOUT f2=8000000 (comments visible)');
-      }
 
-      // Set cookie aggressively with multiple methods
+      // f6=40000000 kept for legacy compatibility; dark mode is now driven by localStorage above
+      var targetPref = shouldUseRestricted
+        ? 'f6=40000000&tz=Asia.Karachi&f5=30000&f7=100&f4=4000000&f2=8000000'
+        : 'f6=40000000&tz=Asia.Karachi&f5=30000&f7=100&f4=4000000';
+
       var cookieValue = "PREF=" + encodeURIComponent(targetPref) + "; path=/; expires=Fri, 31 Dec 9999 23:59:59 GMT; SameSite=Lax";
-
-      // Try all domain variations
       document.cookie = cookieValue + "; domain=.youtube.com";
       document.cookie = cookieValue + "; domain=.m.youtube.com";
       document.cookie = cookieValue + "; domain=youtube.com";
       document.cookie = cookieValue + "; domain=m.youtube.com";
-      document.cookie = cookieValue; // no domain
-
-      console.log('[YT Preload] Set PREF to:', targetPref);
-      console.log('[YT Preload] Cookies after:', document.cookie);
-
-      // Also try to override any existing PREF in localStorage/sessionStorage
-      try {
-        localStorage.setItem('PREF', targetPref);
-        sessionStorage.setItem('PREF', targetPref);
-        console.log('[YT Preload] Also set in storage');
-      } catch(e) {
-        console.log('[YT Preload] Storage set failed:', e);
-      }
+      document.cookie = cookieValue;
     })();
   `;
 

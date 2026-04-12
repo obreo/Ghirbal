@@ -212047,6 +212047,10 @@ apkpure.net
 apkcombo.com
 pgyer.com
 captain-droid.com
+apksum.com
+apkshub.com
+apk.gold
+appsapk.com
 `;
 
 // Import blocklist management functions from source files (avoid circular imports)

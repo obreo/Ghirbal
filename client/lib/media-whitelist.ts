@@ -51,6 +51,12 @@ export const WHITELISTED_DOMAINS: string[] = [
   "amazon.co.uk",
   "ebay.com",
 
+  // YouTube — has its own dedicated content filter (youtubeFixJS via PREF cookie + CSS)
+  // The aggressive media block script breaks YouTube's JS framework and disables comment interactions
+  "youtube.com",
+  "m.youtube.com",
+  "youtu.be",
+
   // Maps
   "maps.google.com",
   "google.com/maps",
