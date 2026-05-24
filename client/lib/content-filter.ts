@@ -272,7 +272,7 @@ export function isBlockedFacebookUrl(url: string): boolean {
 // =============== BLOCKED SEARCH TERMS & KEYWORD URLS ================
 // ====================================================================
 
-export const BLOCKED_KEYWORD_TERMS = ['apk', 'palringo', 'wolf qanawat'];
+export const BLOCKED_KEYWORD_TERMS = ['apk', 'palringo', 'qanawat'];
 
 export function isBlockedSearchQuery(url: string): boolean {
   try {
@@ -291,13 +291,9 @@ export function isBlockedKeywordInUrl(url: string): boolean {
     const urlObj = new URL(url.startsWith('http') ? url : `https://${url}`);
     const domain = urlObj.hostname.toLowerCase();
     const path = urlObj.pathname.toLowerCase();
-    if (['apk', 'palringo'].some(term => domain.includes(term) || path.includes(term))) return true;
+    if (BLOCKED_KEYWORD_TERMS.some(term => domain.includes(term) || path.includes(term))) return true;
     const fullUrl = url.toLowerCase();
-    if (
-      fullUrl.includes('wolf+qanawat') ||
-      fullUrl.includes('wolf%20qanawat') ||
-      fullUrl.includes('wolfqanawat')
-    ) return true;
+    if (BLOCKED_KEYWORD_TERMS.some(term => fullUrl.includes(encodeURIComponent(term)) || fullUrl.includes(term.replace(/ /g, '+')))) return true;
     return false;
   } catch {
     return false;

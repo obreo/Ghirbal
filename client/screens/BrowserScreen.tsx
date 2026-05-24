@@ -66,6 +66,7 @@ import {
   isMediaWhitelisted,
   isOAuthCallbackUrl,
   isReferrerFromSafeSearch,
+  BLOCKED_KEYWORD_TERMS,
 } from '@/lib/content-filter';
 import {
   isGoogleSearchUrl,
@@ -879,29 +880,11 @@ export default function BrowserScreen() {
           var blob = __blobMap[this.href];
           console.log('[BlobIntercept] Blob found in map:', !!blob, blob ? ('type:' + blob.type + ' size:' + blob.size) : 'N/A');
           if (blob) {
-            // Only allow PDF blob downloads; block everything else
-            var blobType = (blob.type || '').toLowerCase();
-            if (blobType !== 'application/pdf') {
-              console.log('[BlobIntercept] BLOCKED non-PDF blob:', blobType);
-              return;
+            // Block ALL blob downloads
+            console.log('[BlobIntercept] BLOCKED blob download:', blob.type);
+            if (window.ReactNativeWebView) {
+              window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'downloadBlocked' }));
             }
-            var reader = new FileReader();
-            reader.onloadend = function() {
-              console.log('[BlobIntercept] FileReader done, dataUrl length:', reader.result ? reader.result.length : 0);
-              if (window.ReactNativeWebView) {
-                console.log('[BlobIntercept] Sending blobData message to RN');
-                window.ReactNativeWebView.postMessage(JSON.stringify({
-                  type: 'blobData',
-                  dataUrl: reader.result
-                }));
-              } else {
-                console.log('[BlobIntercept] ERROR: ReactNativeWebView not available');
-              }
-            };
-            reader.onerror = function() {
-              console.log('[BlobIntercept] FileReader ERROR:', reader.error);
-            };
-            reader.readAsDataURL(blob);
             return;
           } else {
             console.log('[BlobIntercept] Blob NOT found in __blobMap, keys:', Object.keys(__blobMap).length);
@@ -919,7 +902,7 @@ export default function BrowserScreen() {
   // window.open, location.assign/replace, and dynamically injected anchor elements.
   const apkDownloadBlockJS = `
     (function() {
-      var BLOCKED_EXTS = ['.apk','.xapk','.apkm','.apkx','.apks','.exe','.msi','.dmg','.deb','.rpm','.zip','.rar','.7z','.tar','.gz','.bz2','.mp3','.mp4','.avi','.mkv','.mov','.flv','.wmv','.webm','.doc','.docx','.xls','.xlsx','.ppt','.pptx','.sh','.bat','.cmd','.ps1','.iso','.img','.crx','.xpi','.jar'];
+      var BLOCKED_EXTS = ['.apk','.xapk','.apkm','.apkx','.apks','.exe','.msi','.dmg','.deb','.rpm','.zip','.rar','.7z','.tar','.gz','.bz2','.mp3','.mp4','.avi','.mkv','.mov','.flv','.wmv','.webm','.doc','.docx','.xls','.xlsx','.ppt','.pptx','.sh','.bat','.cmd','.ps1','.iso','.img','.crx','.xpi','.jar','.pdf'];
       var APK_MIME = 'application/vnd.android.package-archive';
 
       function isPdfUrl(url) {
@@ -946,8 +929,8 @@ export default function BrowserScreen() {
       function isBlockedDownloadEl(el) {
         if (!el || el.tagName !== 'A') return false;
         var href = el.href || '';
-        if (href.startsWith('blob:')) return false; // blob MIME-type check is done in blobDownloadInterceptJS
-        if (el.hasAttribute('download') && !isPdfUrl(href)) return true;
+        if (href.startsWith('blob:')) return false; // blob handled by blobDownloadInterceptJS
+        if (el.hasAttribute('download')) return true; // block ALL downloads regardless of type
         if (href && isBlockedFileUrl(href)) return true;
         return false;
       }
@@ -1065,10 +1048,26 @@ export default function BrowserScreen() {
   // JavaScript to scan page content for blocked keywords (apk, palringo, wolf qanawat)
   const keywordPageScanJS = `
     (function() {
-      var TERMS = ['palringo', 'wolf qanawat', 'apk'];
-      function notify(term) {
+      var TERMS = ${JSON.stringify(BLOCKED_KEYWORD_TERMS)};
+      function killPage() {
+        // Strip all links so nothing is clickable or copyable
+        var links = document.querySelectorAll('a');
+        for (var i = 0; i < links.length; i++) {
+          links[i].removeAttribute('href');
+          links[i].removeAttribute('download');
+          links[i].style.pointerEvents = 'none';
+          links[i].style.userSelect = 'none';
+        }
+        // Block all form submissions
+        var forms = document.querySelectorAll('form');
+        for (var i = 0; i < forms.length; i++) {
+          forms[i].onsubmit = function() { return false; };
+        }
+        // Prevent text selection so URLs can't be copied from the page
+        document.body && (document.body.style.userSelect = 'none');
+        // Notify React Native to navigate away
         if (window.ReactNativeWebView) {
-          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'keywordBlocked', keyword: term }));
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'keywordBlocked' }));
         }
       }
       function check() {
@@ -1077,7 +1076,7 @@ export default function BrowserScreen() {
         var bodyText = document.body ? (document.body.innerText || '').toLowerCase().substring(0, 20000) : '';
         for (var i = 0; i < TERMS.length; i++) {
           if (title.includes(TERMS[i]) || url.includes(TERMS[i]) || bodyText.includes(TERMS[i])) {
-            notify(TERMS[i]);
+            killPage();
             return;
           }
         }
@@ -1366,8 +1365,9 @@ export default function BrowserScreen() {
   const [findCurrentIndex, setFindCurrentIndex] = useState(0);
 
   const showLinkContextMenu = useCallback((url: string, text: string) => {
+    const lowerUrl = url.toLowerCase();
     const isApkLink = isApkDownload(url) || isNonPdfFileDownload(url) ||
-      (() => { try { const u = new URL(url); const d = u.hostname + u.pathname; return ['apk', 'palringo'].some(t => d.toLowerCase().includes(t)); } catch { return false; } })();
+      BLOCKED_KEYWORD_TERMS.some(t => lowerUrl.includes(t));
 
     if (Platform.OS === 'ios') {
       const options = isApkLink
@@ -1783,7 +1783,7 @@ export default function BrowserScreen() {
           });
         }
       } else if (data.type === 'downloadBlocked') {
-        Alert.alert('Download Blocked', 'Only PDF files can be downloaded.');
+        Alert.alert('Download Blocked', 'Downloads are not allowed.');
       } else if (data.type === 'keywordBlocked') {
         if (activeTabId) {
           updateTab(activeTabId, {
@@ -1793,10 +1793,10 @@ export default function BrowserScreen() {
           setForceNavCounter(c => c + 1);
         }
       } else if (data.type === 'blobData') {
-        // Blob download — could be a PDF, image, or other file.
-        if (__DEV__) console.log('[BlobData] Received blobData message');
+        // All blob downloads are blocked
+        Alert.alert('Download Blocked', 'Downloads are not allowed.');
         const dataUrl = data.dataUrl as string;
-        if (dataUrl) {
+        if (false && dataUrl) {
           if (__DEV__) console.log('[BlobData] dataUrl length:', dataUrl.length, 'preview:', dataUrl.substring(0, 80));
           const mimeMatch = dataUrl.match(/data:(.*?);base64,/);
           if (mimeMatch) {
@@ -4858,9 +4858,7 @@ export default function BrowserScreen() {
               </Pressable>
 
               {!isApkDownload(linkContextMenu.url) && !isNonPdfFileDownload(linkContextMenu.url) &&
-               !['apk', 'palringo'].some(t => {
-                 try { const u = new URL(linkContextMenu.url); return (u.hostname + u.pathname).toLowerCase().includes(t); } catch { return false; }
-               }) && (
+               !BLOCKED_KEYWORD_TERMS.some(t => linkContextMenu.url.toLowerCase().includes(t)) && (
                 <Pressable
                   onPress={() => {
                     setLinkContextMenu(null);
@@ -5696,16 +5694,11 @@ export default function BrowserScreen() {
                 thirdPartyCookiesEnabled={true}
                 sharedCookiesEnabled={true}
                 onFileDownload={(event: any) => {
+                  if (__DEV__) console.log('[onFileDownload] Triggered, url:', event.nativeEvent.downloadUrl);
+                  // All downloads are blocked
+                  Alert.alert('Download Blocked', 'Downloads are not allowed.');
+                  return;
                   const url = event.nativeEvent.downloadUrl;
-                  if (__DEV__) console.log('[onFileDownload] Triggered, url:', url);
-
-                  // Block all non-PDF downloads at the native layer
-                  const lowerUrl = (url || '').toLowerCase().split('?')[0].split('#')[0];
-                  const isPdf = lowerUrl.endsWith('.pdf');
-                  if (!isPdf) {
-                    Alert.alert('Download Blocked', 'Only PDF files can be downloaded.');
-                    return;
-                  }
 
                   // Handle blob: URLs - DownloadManager only supports HTTP/HTTPS
                   // Use the stored __blobMap from the preload intercept (avoids CSP/fetch issues)
