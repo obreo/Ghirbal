@@ -269,12 +269,59 @@ export function isBlockedFacebookUrl(url: string): boolean {
 }
 
 // ====================================================================
-// =============== APK DOWNLOAD DETECTION =============================
+// =============== BLOCKED SEARCH TERMS & KEYWORD URLS ================
 // ====================================================================
+
+export const BLOCKED_KEYWORD_TERMS = ['apk', 'palringo', 'wolf qanawat'];
+
+export function isBlockedSearchQuery(url: string): boolean {
+  try {
+    const urlObj = new URL(url.startsWith('http') ? url : `https://${url}`);
+    const q = urlObj.searchParams.get('q') || urlObj.searchParams.get('query') || urlObj.searchParams.get('search') || '';
+    if (!q) return false;
+    const lower = q.toLowerCase();
+    return BLOCKED_KEYWORD_TERMS.some(term => lower.includes(term));
+  } catch {
+    return false;
+  }
+}
+
+export function isBlockedKeywordInUrl(url: string): boolean {
+  try {
+    const urlObj = new URL(url.startsWith('http') ? url : `https://${url}`);
+    const domain = urlObj.hostname.toLowerCase();
+    const path = urlObj.pathname.toLowerCase();
+    if (['apk', 'palringo'].some(term => domain.includes(term) || path.includes(term))) return true;
+    const fullUrl = url.toLowerCase();
+    if (
+      fullUrl.includes('wolf+qanawat') ||
+      fullUrl.includes('wolf%20qanawat') ||
+      fullUrl.includes('wolfqanawat')
+    ) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// ====================================================================
+// =============== DOWNLOAD DETECTION =================================
+// ====================================================================
+
+// File extensions that are never allowed to download (non-PDF rule)
+const BLOCKED_DOWNLOAD_EXTENSIONS = [
+  '.apk', '.xapk', '.apkm', '.apkx', '.apks',
+  '.exe', '.msi', '.dmg', '.deb', '.rpm',
+  '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2',
+  '.mp3', '.mp4', '.avi', '.mkv', '.mov', '.flv', '.wmv', '.webm',
+  '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+  '.sh', '.bat', '.cmd', '.ps1',
+  '.iso', '.img', '.crx', '.xpi', '.jar',
+];
+
 export function isApkDownload(url: string): boolean {
   const lowerUrl = url.toLowerCase();
 
-  // Check file extensions
   if (
     lowerUrl.endsWith(".apk") ||
     lowerUrl.endsWith(".xapk") ||
@@ -285,38 +332,33 @@ export function isApkDownload(url: string): boolean {
     return true;
   }
 
-  // Check URL path and query parameters for APK-related patterns
   const apkPatterns = [
-    '/download.apk',
-    '/app.apk',
-    '.apk?',
-    '.apk&',
-    '/apk/',
-    'download=apk',
-    'type=apk',
-    'file=apk',
-    'format=apk',
-    '/getapk',
-    '/downloadapk',
-    '/apk-download',
-    'apkpure.com',
-    'apkmirror.com',
-    'apkcombo.com',
-    'apk-dl.com',
-    'aptoide.com',
+    '/download.apk', '/app.apk', '.apk?', '.apk&', '/apk/',
+    'download=apk', 'type=apk', 'file=apk', 'format=apk',
+    '/getapk', '/downloadapk', '/apk-download',
+    'apkpure.com', 'apkmirror.com', 'apkcombo.com', 'apk-dl.com', 'aptoide.com',
   ];
 
-  if (apkPatterns.some(pattern => lowerUrl.includes(pattern))) {
-    return true;
-  }
+  if (apkPatterns.some(pattern => lowerUrl.includes(pattern))) return true;
 
-  // Check Content-Disposition-like patterns in URL
   if (lowerUrl.includes('application/vnd.android.package-archive') ||
     lowerUrl.includes('application%2fvnd.android.package-archive')) {
     return true;
   }
 
   return false;
+}
+
+// Returns true for any URL that points to a non-PDF downloadable file by extension.
+// PDFs are always allowed; everything else in BLOCKED_DOWNLOAD_EXTENSIONS is not.
+export function isNonPdfFileDownload(url: string): boolean {
+  try {
+    const lower = url.toLowerCase().split('?')[0].split('#')[0];
+    if (lower.endsWith('.pdf')) return false;
+    return BLOCKED_DOWNLOAD_EXTENSIONS.some(ext => lower.endsWith(ext));
+  } catch {
+    return false;
+  }
 }
 
 
@@ -349,7 +391,25 @@ export function processUrl(inputUrl: string, context: 'navigation' | 'resource' 
       url,
       blocked: true,
       reason: "APK downloads are not allowed",
-      showAlert: context === 'navigation'  // Only show alert for user-initiated APK attempts
+      showAlert: context === 'navigation',
+    };
+  }
+
+  if (isBlockedSearchQuery(url)) {
+    return {
+      url,
+      blocked: true,
+      reason: "This search is not allowed",
+      showAlert: context === 'navigation',
+    };
+  }
+
+  if (isBlockedKeywordInUrl(url)) {
+    return {
+      url,
+      blocked: true,
+      reason: "This website is blocked for safety",
+      showAlert: context === 'navigation',
     };
   }
 
@@ -464,21 +524,6 @@ export function getUrlOrSearch(input: string): string {
 // Re-export blocklist initialization for app startup
 export { initializeBlocklists } from './Blocklist/blocklist';
 
-// Re-export content filtering functions
-export {
-  isBlockedSearchEngine,
-  isBlockedDomain,
-  processUrl,
-  getUrlOrSearch,
-  isValidUrl,
-  formatSearchUrl,
-  isApkDownload,
-  isReferrerFromSafeSearch,
-  isSafeSearchEnginePage,
-  isOAuthCallbackUrl,
-  // isUrlBlockedByPattern, // Removed due to runtime error
-  // debugUrlBlocking, // Removed due to runtime error
-};
 
 // Re-export media whitelist functions
 export { getWhitelistedDomains, getWhitelistedPaths } from './media-whitelist';

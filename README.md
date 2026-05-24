@@ -34,6 +34,40 @@ Allows users to add custom domains to the blocklist through local files, manual 
 - **Data Isolation**: Site data isolation and clearing capabilities
 - **Content Filtering**: JavaScript-based content filtering for visual elements
 
+### Paywall Bypass
+- **Automatic Platform Blocking**: Paywall scripts from major platforms (Piano/Tinypass, Poool, Sophi, Pelcro, Zephr, Cxense, Axate, Arc CDN) are blocked on all pages automatically — no configuration needed.
+- **Bot User-Agent Spoofing**: For sites that grant bots full access for SEO, the browser presents as Googlebot or Bingbot, bypassing the paywall at the server level.
+- **50+ Pre-configured Sites**: Includes ready-to-use bypass rules for major publications (FT, NYT, Bloomberg, Washington Post, The Atlantic, Wired, HBR, and many more).
+- **DOM Cleanup**: Optionally removes paywall overlay elements and restores scrolling after page load.
+
+#### Adding a New Paywall Site
+
+For most sites, adding bypass support is a single line. Open `client/lib/filters/paywall_bypass.ts` and add the domain to `GOOGLEBOT_DOMAINS`:
+
+```typescript
+const GOOGLEBOT_DOMAINS: string[] = [
+  'ft.com',
+  'newyorker.com',
+  'yoursite.com',   // ← just add the domain here
+  // ...
+];
+```
+
+That's it — the browser will automatically use a Googlebot User-Agent when visiting that site, which causes most paywalls to serve the full article.
+
+For sites that need script blocking or DOM manipulation beyond the UA change, add an entry to `BYPASS_RULES` instead:
+
+```typescript
+const BYPASS_RULES: Record<string, BypassRule> = {
+  'example.com': {
+    ua: 'g',                            // 'g' = Googlebot, 'b' = Bingbot, 'f' = Facebookbot
+    block: '\\.paywall-provider\\.com\\/',  // regex: block this script URL
+    cs_code: "document.querySelector('.paywall-overlay')?.remove();",  // run after load
+  },
+  // ...
+};
+```
+
 ### User Experience
 - **Tab Management**: Multiple tab support with tab switching
 - **Bookmark System**: Save and organize favorite sites

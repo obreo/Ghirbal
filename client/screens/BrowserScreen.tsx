@@ -59,6 +59,7 @@ import {
 import {
   processUrl,
   isApkDownload,
+  isNonPdfFileDownload,
   getUrlOrSearch,
   isSubredditPage,
   getSubredditName,
@@ -78,6 +79,12 @@ import {
   getGoogleUiCleanupScript,
 } from '@/lib/search_engine_restrictions';
 import { isYouTubeAlwaysRestrictedEnabled } from '@/lib/app-config';
+import {
+  getBypassUA,
+  getBypassRule,
+  PAYWALL_BYPASS_PRELOAD_JS,
+  PAYWALL_BYPASS_POSTLOAD_JS,
+} from '@/lib/filters/paywall_bypass';
 
 const DEBUG_CONSOLE_PROXY_JS = __DEV__ ? `
 (function() {
@@ -118,45 +125,7 @@ const DEBUG_CONSOLE_PROXY_JS = __DEV__ ? `
 })();
 ` : '';
 
-// --- Download Content Type Validation ---
-// Blocklist of dangerous MIME types that should never be processed as downloads
-const BLOCKED_DOWNLOAD_MIME_TYPES = [
-  'application/x-msdownload',        // .exe, .dll
-  'application/x-executable',        // Linux executables
-  'application/vnd.android.package-archive', // .apk
-  'application/x-msdos-program',     // .com, .bat
-  'application/x-sh',                // Shell scripts
-  'application/x-httpd-php',         // PHP
-  'text/html',                       // HTML (could contain scripts)
-  'application/xhtml+xml',           // XHTML
-  'application/javascript',          // JavaScript
-  'text/javascript',                 // JavaScript
-  'application/x-javascript',        // JavaScript
-];
-
-// Allowlist of safe MIME types for general blob/file downloads
-const ALLOWED_DOWNLOAD_MIME_TYPES = new Set([
-  // Images
-  'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp',
-  'image/bmp', 'image/tiff', 'image/svg+xml',
-  // Documents
-  'application/pdf',
-  'text/plain', 'text/csv',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.ms-excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/vnd.ms-powerpoint',
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  // Archives
-  'application/zip', 'application/x-zip-compressed',
-  'application/x-rar-compressed', 'application/x-7z-compressed',
-  // Audio/Video
-  'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/mp4',
-  'video/mp4', 'video/webm', 'video/ogg', 'video/mpeg',
-  // Data
-  'application/json', 'application/xml', 'text/xml',
-]);
+// Only PDF downloads are permitted — all other file types are blocked.
 
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp', 'image/bmp',
@@ -910,14 +879,11 @@ export default function BrowserScreen() {
           var blob = __blobMap[this.href];
           console.log('[BlobIntercept] Blob found in map:', !!blob, blob ? ('type:' + blob.type + ' size:' + blob.size) : 'N/A');
           if (blob) {
-            // Validate blob content type against blocklist
-            var blockedTypes = ${JSON.stringify(BLOCKED_DOWNLOAD_MIME_TYPES)};
+            // Only allow PDF blob downloads; block everything else
             var blobType = (blob.type || '').toLowerCase();
-            for (var i = 0; i < blockedTypes.length; i++) {
-              if (blobType === blockedTypes[i]) {
-                console.log('[BlobIntercept] BLOCKED dangerous type:', blobType);
-                return; // Don't process, don't fall through to origClick
-              }
+            if (blobType !== 'application/pdf') {
+              console.log('[BlobIntercept] BLOCKED non-PDF blob:', blobType);
+              return;
             }
             var reader = new FileReader();
             reader.onloadend = function() {
@@ -948,121 +914,130 @@ export default function BrowserScreen() {
     true;
   `;
 
-  // JavaScript to block ALL APK downloads at the page level
+  // Block all non-PDF downloads at the JS layer.
+  // Covers: direct href links, <a download>, JS-triggered programmatic clicks,
+  // window.open, location.assign/replace, and dynamically injected anchor elements.
   const apkDownloadBlockJS = `
     (function() {
-      var APK_EXTENSIONS = ['.apk', '.xapk', '.apkm', '.apkx', '.apks'];
+      var BLOCKED_EXTS = ['.apk','.xapk','.apkm','.apkx','.apks','.exe','.msi','.dmg','.deb','.rpm','.zip','.rar','.7z','.tar','.gz','.bz2','.mp3','.mp4','.avi','.mkv','.mov','.flv','.wmv','.webm','.doc','.docx','.xls','.xlsx','.ppt','.pptx','.sh','.bat','.cmd','.ps1','.iso','.img','.crx','.xpi','.jar'];
       var APK_MIME = 'application/vnd.android.package-archive';
 
-      function isApkUrl(url) {
+      function isPdfUrl(url) {
+        if (!url || typeof url !== 'string') return false;
+        return url.toLowerCase().split('?')[0].split('#')[0].endsWith('.pdf');
+      }
+
+      function isBlockedFileUrl(url) {
         if (!url || typeof url !== 'string') return false;
         var lower = url.toLowerCase().split('?')[0].split('#')[0];
-        for (var i = 0; i < APK_EXTENSIONS.length; i++) {
-          if (lower.endsWith(APK_EXTENSIONS[i])) return true;
+        for (var i = 0; i < BLOCKED_EXTS.length; i++) {
+          if (lower.endsWith(BLOCKED_EXTS[i])) return true;
         }
-        // Check query string and path patterns
         var full = url.toLowerCase();
-        if (full.includes('.apk?') || full.includes('.apk&') || full.includes('/apk/') ||
+        return (full.includes('.apk?') || full.includes('.apk&') || full.includes('/apk/') ||
             full.includes('download=apk') || full.includes('type=apk') || full.includes('format=apk') ||
             full.includes('/getapk') || full.includes('/downloadapk') || full.includes('/apk-download') ||
             full.includes('application/vnd.android.package-archive') ||
-            full.includes('application%2fvnd.android.package-archive')) return true;
+            full.includes('application%2fvnd.android.package-archive'));
+      }
+
+      // Any <a> element that should be blocked: has download attr and isn't a PDF, OR href points to blocked extension.
+      // Blob URLs are excluded — they're handled by the blob interceptor which checks MIME type.
+      function isBlockedDownloadEl(el) {
+        if (!el || el.tagName !== 'A') return false;
+        var href = el.href || '';
+        if (href.startsWith('blob:')) return false; // blob MIME-type check is done in blobDownloadInterceptJS
+        if (el.hasAttribute('download') && !isPdfUrl(href)) return true;
+        if (href && isBlockedFileUrl(href)) return true;
         return false;
       }
 
-      // 1. Intercept anchor clicks (covers <a href="x.apk"> and <a download>)
+      function notify(url) {
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'downloadBlocked', url: url }));
+        }
+      }
+
+      // 1. Intercept anchor clicks — catches both explicit and JS-synthesized click events
       document.addEventListener('click', function(e) {
         var el = e.target;
         while (el && el.tagName !== 'A') el = el.parentElement;
-        if (el && el.href && isApkUrl(el.href)) {
+        if (el && isBlockedDownloadEl(el)) {
           e.preventDefault();
           e.stopImmediatePropagation();
-          console.log('[APK Block] Blocked click on APK link:', el.href);
-          if (window.ReactNativeWebView) {
-            window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'apkBlocked', url: el.href }));
-          }
+          notify(el.href);
           return false;
         }
       }, true);
 
-      // 2. Intercept window.location assignments
-      var origLocationAssign = window.location.assign;
-      var origLocationReplace = window.location.replace;
-      if (origLocationAssign) {
+      // 2. location.assign / location.replace
+      // These are wrapped individually because Location properties are non-writable
+      // in strict WebView contexts and assignment throws a TypeError.
+      try {
+        var origLocationAssign = window.location.assign.bind(window.location);
         window.location.assign = function(url) {
-          if (isApkUrl(url)) { console.log('[APK Block] Blocked location.assign:', url); return; }
-          return origLocationAssign.call(window.location, url);
+          if (typeof url === 'string' && isBlockedFileUrl(url)) { notify(url); return; }
+          origLocationAssign(url);
         };
-      }
-      if (origLocationReplace) {
+      } catch(e) {}
+      try {
+        var origLocationReplace = window.location.replace.bind(window.location);
         window.location.replace = function(url) {
-          if (isApkUrl(url)) { console.log('[APK Block] Blocked location.replace:', url); return; }
-          return origLocationReplace.call(window.location, url);
+          if (typeof url === 'string' && isBlockedFileUrl(url)) { notify(url); return; }
+          origLocationReplace(url);
         };
-      }
+      } catch(e) {}
 
-      // 3. Intercept window.open
+      // 3. window.open
       var origOpen = window.open;
       window.open = function(url) {
-        if (isApkUrl(url)) { console.log('[APK Block] Blocked window.open:', url); return null; }
+        if (typeof url === 'string' && isBlockedFileUrl(url)) { notify(url); return null; }
         return origOpen.apply(window, arguments);
       };
 
-      // 4. Intercept programmatic anchor clicks
+      // 4. Programmatic HTMLAnchorElement.click() — catches createElement+click() pattern
       var origAnchorClick = HTMLAnchorElement.prototype.click;
       HTMLAnchorElement.prototype.click = function() {
-        if (this.href && isApkUrl(this.href)) {
-          console.log('[APK Block] Blocked programmatic .click() on APK link:', this.href);
-          return;
-        }
+        if (isBlockedDownloadEl(this)) { notify(this.href); return; }
         return origAnchorClick.call(this);
       };
 
-      // 5. Intercept createElement to neuter dynamically created APK links
+      // 5. setAttribute — neuter dynamically set blocked hrefs / iframe srcs
       var origSetAttribute = Element.prototype.setAttribute;
       Element.prototype.setAttribute = function(name, value) {
-        if (this.tagName === 'A' && name === 'href' && isApkUrl(value)) {
-          console.log('[APK Block] Blocked setAttribute href to APK:', value);
-          return;
-        }
-        if (this.tagName === 'IFRAME' && name === 'src' && isApkUrl(value)) {
-          console.log('[APK Block] Blocked iframe src to APK:', value);
-          return;
-        }
+        if (this.tagName === 'A' && name === 'href' && isBlockedFileUrl(value)) return;
+        if (this.tagName === 'IFRAME' && name === 'src' && isBlockedFileUrl(value)) return;
         return origSetAttribute.call(this, name, value);
       };
 
-      // 6. Block APK blob creation
+      // 6. Block APK MIME blob creation outright (non-PDF blobs handled in blobDownloadInterceptJS)
       var origCreateObjectURL = URL.createObjectURL;
       URL.createObjectURL = function(obj) {
         if (obj instanceof Blob && obj.type && obj.type.toLowerCase() === APK_MIME) {
-          console.log('[APK Block] Blocked createObjectURL for APK blob');
           return 'about:blank';
         }
         return origCreateObjectURL.call(this, obj);
       };
 
-      // 7. MutationObserver to catch any APK links/iframes added to DOM
+      // 7. MutationObserver — strips blocked links/iframes added to DOM after load
       var observer = new MutationObserver(function(mutations) {
         for (var i = 0; i < mutations.length; i++) {
           var nodes = mutations[i].addedNodes;
           for (var j = 0; j < nodes.length; j++) {
             var node = nodes[j];
             if (node.nodeType !== 1) continue;
-            // Check the node itself
-            if (node.tagName === 'A' && node.href && isApkUrl(node.href)) {
+            if (isBlockedDownloadEl(node)) {
               node.removeAttribute('href');
               node.removeAttribute('download');
               node.style.pointerEvents = 'none';
             }
-            if (node.tagName === 'IFRAME' && node.src && isApkUrl(node.src)) {
+            if (node.tagName === 'IFRAME' && node.src && isBlockedFileUrl(node.src)) {
               node.removeAttribute('src');
             }
-            // Check children
             if (node.querySelectorAll) {
-              var links = node.querySelectorAll('a[href]');
+              var links = node.querySelectorAll('a');
               for (var k = 0; k < links.length; k++) {
-                if (isApkUrl(links[k].href)) {
+                if (isBlockedDownloadEl(links[k])) {
                   links[k].removeAttribute('href');
                   links[k].removeAttribute('download');
                   links[k].style.pointerEvents = 'none';
@@ -1070,15 +1045,12 @@ export default function BrowserScreen() {
               }
               var iframes = node.querySelectorAll('iframe[src]');
               for (var m = 0; m < iframes.length; m++) {
-                if (isApkUrl(iframes[m].src)) {
-                  iframes[m].removeAttribute('src');
-                }
+                if (isBlockedFileUrl(iframes[m].src)) iframes[m].removeAttribute('src');
               }
             }
           }
         }
       });
-
       if (document.documentElement) {
         observer.observe(document.documentElement, { childList: true, subtree: true });
       } else {
@@ -1086,8 +1058,35 @@ export default function BrowserScreen() {
           observer.observe(document.documentElement, { childList: true, subtree: true });
         });
       }
+    })();
+    true;
+  `;
 
-      console.log('[APK Block] APK download blocking initialized');
+  // JavaScript to scan page content for blocked keywords (apk, palringo, wolf qanawat)
+  const keywordPageScanJS = `
+    (function() {
+      var TERMS = ['palringo', 'wolf qanawat', 'apk'];
+      function notify(term) {
+        if (window.ReactNativeWebView) {
+          window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'keywordBlocked', keyword: term }));
+        }
+      }
+      function check() {
+        var title = (document.title || '').toLowerCase();
+        var url = window.location.href.toLowerCase();
+        var bodyText = document.body ? (document.body.innerText || '').toLowerCase().substring(0, 20000) : '';
+        for (var i = 0; i < TERMS.length; i++) {
+          if (title.includes(TERMS[i]) || url.includes(TERMS[i]) || bodyText.includes(TERMS[i])) {
+            notify(TERMS[i]);
+            return;
+          }
+        }
+      }
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', check);
+      } else {
+        check();
+      }
     })();
     true;
   `;
@@ -1367,12 +1366,14 @@ export default function BrowserScreen() {
   const [findCurrentIndex, setFindCurrentIndex] = useState(0);
 
   const showLinkContextMenu = useCallback((url: string, text: string) => {
-    const options = Platform.OS === 'ios'
-      ? ['Open in New Tab', 'Copy Link', 'Cancel']
-      : ['Open in New Tab', 'Copy Link'];
-    const cancelButtonIndex = Platform.OS === 'ios' ? 2 : undefined;
+    const isApkLink = isApkDownload(url) || isNonPdfFileDownload(url) ||
+      (() => { try { const u = new URL(url); const d = u.hostname + u.pathname; return ['apk', 'palringo'].some(t => d.toLowerCase().includes(t)); } catch { return false; } })();
 
     if (Platform.OS === 'ios') {
+      const options = isApkLink
+        ? ['Open in New Tab', 'Cancel']
+        : ['Open in New Tab', 'Copy Link', 'Cancel'];
+      const cancelButtonIndex = options.length - 1;
       ActionSheetIOS.showActionSheetWithOptions(
         { options, cancelButtonIndex, title: text.length > 50 ? text.substring(0, 50) + '...' : text },
         async (buttonIndex) => {
@@ -1383,7 +1384,7 @@ export default function BrowserScreen() {
             } else if (result.showAlert) {
               Alert.alert('Content Blocked', result.reason || 'This content is blocked');
             }
-          } else if (buttonIndex === 1) {
+          } else if (!isApkLink && buttonIndex === 1) {
             Clipboard.setStringAsync(url);
           }
         }
@@ -1781,8 +1782,16 @@ export default function BrowserScreen() {
             sourceUrl: SAFE_SEARCH_HOMEPAGE
           });
         }
-      } else if (data.type === 'apkBlocked') {
-        Alert.alert('Download Blocked', 'APK downloads are not allowed for security reasons.');
+      } else if (data.type === 'downloadBlocked') {
+        Alert.alert('Download Blocked', 'Only PDF files can be downloaded.');
+      } else if (data.type === 'keywordBlocked') {
+        if (activeTabId) {
+          updateTab(activeTabId, {
+            url: SAFE_SEARCH_HOMEPAGE,
+            sourceUrl: SAFE_SEARCH_HOMEPAGE,
+          });
+          setForceNavCounter(c => c + 1);
+        }
       } else if (data.type === 'blobData') {
         // Blob download — could be a PDF, image, or other file.
         if (__DEV__) console.log('[BlobData] Received blobData message');
@@ -1792,10 +1801,10 @@ export default function BrowserScreen() {
           const mimeMatch = dataUrl.match(/data:(.*?);base64,/);
           if (mimeMatch) {
             const mimeType = mimeMatch[1].toLowerCase();
-            // Validate MIME type against allowlist
-            if (!ALLOWED_DOWNLOAD_MIME_TYPES.has(mimeType)) {
-              if (__DEV__) console.log('[BlobData] Rejected disallowed MIME type:', mimeType);
-              Alert.alert('Download Blocked', 'This file type is not supported for download.');
+            // Only allow PDF blob downloads
+            if (mimeType !== 'application/pdf') {
+              if (__DEV__) console.log('[BlobData] Rejected non-PDF MIME type:', mimeType);
+              Alert.alert('Download Blocked', 'Only PDF files can be downloaded.');
               return;
             }
             const base64Data = dataUrl.replace(/data:.*?;base64,/, '');
@@ -3990,21 +3999,18 @@ export default function BrowserScreen() {
 
   // Set user agent for specific sites
   const getUserAgent = (): string => {
-    // OLD: Android 13 / Chrome 120
-    // const defaultUA = 'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
-
     // NEW: Android 14 / Chrome 130 (Modern, less likely to be flagged)
     const defaultUA = 'Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.6723.102 Mobile Safari/537.36';
 
+    // Paywall bypass: use bot UA for sites that allow bots but restrict humans
+    const bypassUA = getBypassUA(currentUrl);
+    if (bypassUA) return bypassUA;
+
     if (currentUrl.includes('chatgpt.com')) {
-      // ChatGPT: Use desktop user agent but allow mobile responsiveness
-      // This helps with file attachment compatibility
       return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
     } else if (currentUrl.includes('gmail.com') || currentUrl.includes('drive.google.com')) {
-      // Google services: Use desktop user agent for better file attachment support
       return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
     } else if (currentUrl.includes('dropbox.com') || currentUrl.includes('onedrive')) {
-      // Cloud storage services: Use desktop user agent for better file handling
       return 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
     }
 
@@ -4851,19 +4857,24 @@ export default function BrowserScreen() {
                 <ThemedText style={styles.linkContextMenuButtonText}>Open in New Tab</ThemedText>
               </Pressable>
 
-              <Pressable
-                onPress={() => {
-                  setLinkContextMenu(null);
-                  Clipboard.setStringAsync(linkContextMenu.url);
-                }}
-                style={({ pressed }) => [
-                  styles.linkContextMenuButton,
-                  { borderBottomColor: theme.border },
-                  pressed && styles.linkContextMenuButtonPressed,
-                ]}
-              >
-                <ThemedText style={styles.linkContextMenuButtonText}>Copy Link</ThemedText>
-              </Pressable>
+              {!isApkDownload(linkContextMenu.url) && !isNonPdfFileDownload(linkContextMenu.url) &&
+               !['apk', 'palringo'].some(t => {
+                 try { const u = new URL(linkContextMenu.url); return (u.hostname + u.pathname).toLowerCase().includes(t); } catch { return false; }
+               }) && (
+                <Pressable
+                  onPress={() => {
+                    setLinkContextMenu(null);
+                    Clipboard.setStringAsync(linkContextMenu.url);
+                  }}
+                  style={({ pressed }) => [
+                    styles.linkContextMenuButton,
+                    { borderBottomColor: theme.border },
+                    pressed && styles.linkContextMenuButtonPressed,
+                  ]}
+                >
+                  <ThemedText style={styles.linkContextMenuButtonText}>Copy Link</ThemedText>
+                </Pressable>
+              )}
 
             </View>
           </Pressable>
@@ -5307,6 +5318,15 @@ export default function BrowserScreen() {
           // Skip heavy scripts for auth/OAuth pages to avoid interfering with authentication flows
           const skipHeavyScripts = tabIsGoogleAuth || tabIsOAuthCallback;
 
+          // Paywall bypass rule for this tab's domain
+          let tabBypassRule = null;
+          try {
+            if (tab.url) {
+              const tabHostname = new URL(tab.url).hostname.replace(/^www\./, '');
+              tabBypassRule = getBypassRule(tabHostname);
+            }
+          } catch {}
+
           return (
             <Animated.View key={tab.id} style={[styles.webViewContainer, webViewContainerAnimatedStyle, tab.id === activeTabId ? {} : { display: 'none' }]}>
               <WebView
@@ -5511,8 +5531,8 @@ export default function BrowserScreen() {
                     }, true);
                   }
                 })();
-              ` + (skipHeavyScripts ? DEBUG_CONSOLE_PROXY_JS + scrollTrackingJS : injectedJS) + (!skipHeavyScripts && tabIsYouTube ? youtubeFixJS : '') + (!skipHeavyScripts && tabIsReddit ? REDDIT_NSFW_FILTER_JS : '') + (!skipHeavyScripts && tabIsGoogle ? GOOGLE_SAFESEARCH_SUPPRESSION_JS + GOOGLE_SECTIONS_BLOCK_JS : '')}
-                injectedJavaScriptBeforeContentLoaded={skipHeavyScripts ? DEBUG_CONSOLE_PROXY_JS : (apkDownloadBlockJS + blobDownloadInterceptJS + facebookDeepLinkPreventionJS + mediaFilterPreloadJS + (tabIsYouTube ? youtubePreloadJS + ';' + youtubeFixJS : '') + (tabIsReddit ? REDDIT_EARLY_CSS_JS : '') + (tabIsGoogle ? GOOGLE_SAFESEARCH_SUPPRESSION_JS + GOOGLE_SECTIONS_BLOCK_JS : '') + getPermissionBlockingScript(currentHostname))}
+              ` + (skipHeavyScripts ? DEBUG_CONSOLE_PROXY_JS + scrollTrackingJS : injectedJS) + (!skipHeavyScripts && tabIsYouTube ? youtubeFixJS : '') + (!skipHeavyScripts && tabIsReddit ? REDDIT_NSFW_FILTER_JS : '') + (!skipHeavyScripts && tabIsGoogle ? GOOGLE_SAFESEARCH_SUPPRESSION_JS + GOOGLE_SECTIONS_BLOCK_JS : '') + (!skipHeavyScripts ? PAYWALL_BYPASS_POSTLOAD_JS : '')}
+                injectedJavaScriptBeforeContentLoaded={skipHeavyScripts ? DEBUG_CONSOLE_PROXY_JS : (apkDownloadBlockJS + blobDownloadInterceptJS + keywordPageScanJS + PAYWALL_BYPASS_PRELOAD_JS + facebookDeepLinkPreventionJS + mediaFilterPreloadJS + (tabIsYouTube ? youtubePreloadJS + ';' + youtubeFixJS : '') + (tabIsReddit ? REDDIT_EARLY_CSS_JS : '') + (tabIsGoogle ? GOOGLE_SAFESEARCH_SUPPRESSION_JS + GOOGLE_SECTIONS_BLOCK_JS : '') + getPermissionBlockingScript(currentHostname))}
                 key={`${tab.id}-${permissionCounter}-${forceNavCounter}`}
                 originWhitelist={['*']}
                 allowsBackForwardNavigationGestures
@@ -5554,13 +5574,10 @@ export default function BrowserScreen() {
                             // 1. Fetch the blob while still in the originating page context
                             var targetUrl = ${JSON.stringify(targetUrl)};
                             var resp = await fetch(targetUrl);
-                            // Validate content type before processing
+                            // Validate content type is PDF before processing
                             var ct = (resp.headers.get('content-type') || '').toLowerCase();
-                            var blockedTypes = ${JSON.stringify(BLOCKED_DOWNLOAD_MIME_TYPES)};
-                            for (var i = 0; i < blockedTypes.length; i++) {
-                              if (ct.indexOf(blockedTypes[i]) !== -1) {
-                                throw new Error('Blocked content type: ' + ct);
-                              }
+                            if (!ct.includes('application/pdf') && !ct.includes('octet-stream')) {
+                              throw new Error('Blocked non-PDF content type: ' + ct);
                             }
                             var arrayBuffer = await resp.arrayBuffer();
 
@@ -5679,13 +5696,16 @@ export default function BrowserScreen() {
                 thirdPartyCookiesEnabled={true}
                 sharedCookiesEnabled={true}
                 onFileDownload={(event: any) => {
-                  if (isApkDownload(event.nativeEvent.downloadUrl)) {
-                    Alert.alert('Download Blocked', 'APK downloads are not allowed.');
-                    return;
-                  }
-
                   const url = event.nativeEvent.downloadUrl;
                   if (__DEV__) console.log('[onFileDownload] Triggered, url:', url);
+
+                  // Block all non-PDF downloads at the native layer
+                  const lowerUrl = (url || '').toLowerCase().split('?')[0].split('#')[0];
+                  const isPdf = lowerUrl.endsWith('.pdf');
+                  if (!isPdf) {
+                    Alert.alert('Download Blocked', 'Only PDF files can be downloaded.');
+                    return;
+                  }
 
                   // Handle blob: URLs - DownloadManager only supports HTTP/HTTPS
                   // Use the stored __blobMap from the preload intercept (avoids CSP/fetch issues)
@@ -5698,14 +5718,11 @@ export default function BrowserScreen() {
                         var blob = window.__blobMap && window.__blobMap[blobUrl];
                         console.log('[onFileDownload-JS] Blob found:', !!blob, blob ? ('type:' + blob.type + ' size:' + blob.size) : 'N/A');
                         if (blob) {
-                          // Validate blob content type against blocklist
-                          var blockedTypes = ${JSON.stringify(BLOCKED_DOWNLOAD_MIME_TYPES)};
+                          // Only allow PDF blobs
                           var blobType = (blob.type || '').toLowerCase();
-                          for (var bi = 0; bi < blockedTypes.length; bi++) {
-                            if (blobType === blockedTypes[bi]) {
-                              console.log('[onFileDownload-JS] BLOCKED dangerous type:', blobType);
-                              return;
-                            }
+                          if (blobType !== 'application/pdf') {
+                            console.log('[onFileDownload-JS] BLOCKED non-PDF blob:', blobType);
+                            return;
                           }
                           var reader = new FileReader();
                           reader.onloadend = function() {
@@ -5730,14 +5747,11 @@ export default function BrowserScreen() {
                             return r.blob();
                           }).then(function(b) {
                             console.log('[onFileDownload-JS] Fetch blob:', b.type, b.size);
-                            // Validate fetched blob type
+                            // Only allow PDF blobs from fetch fallback
                             var fbType = (b.type || '').toLowerCase();
-                            var fBlockedTypes = ${JSON.stringify(BLOCKED_DOWNLOAD_MIME_TYPES)};
-                            for (var fi = 0; fi < fBlockedTypes.length; fi++) {
-                              if (fbType === fBlockedTypes[fi]) {
-                                console.log('[onFileDownload-JS] BLOCKED dangerous fetch blob type:', fbType);
-                                return;
-                              }
+                            if (fbType !== 'application/pdf') {
+                              console.log('[onFileDownload-JS] BLOCKED non-PDF fetch blob:', fbType);
+                              return;
                             }
                             var reader = new FileReader();
                             reader.onloadend = function() {
