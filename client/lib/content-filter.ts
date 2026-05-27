@@ -272,7 +272,17 @@ export function isBlockedFacebookUrl(url: string): boolean {
 // =============== BLOCKED SEARCH TERMS & KEYWORD URLS ================
 // ====================================================================
 
-export const BLOCKED_KEYWORD_TERMS = ['apk', 'xapk', 'palringo', 'qanawat'];
+function parseKeywordTerms(raw: string | undefined): string[] {
+  if (!raw) return ['apk', 'xapk', 'palringo', 'qanawat'];
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map((t: string) => t.toLowerCase().trim()).filter(Boolean);
+  } catch {}
+  // comma-separated fallback
+  return raw.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+}
+
+export const BLOCKED_KEYWORD_TERMS: string[] = parseKeywordTerms(process.env.BLOCKED_KEYWORD_TERMS);
 
 export function isBlockedSearchQuery(url: string): boolean {
   try {

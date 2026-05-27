@@ -9,7 +9,7 @@ dist/
 web-build/
 expo-env.d.ts
 build-*
-app.json
+# app.json
 !backups/app.json
 
 # Native

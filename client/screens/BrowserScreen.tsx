@@ -3210,6 +3210,19 @@ export default function BrowserScreen() {
       // For new sites (undefined) and allowed sites (true), allow navigation
     }
 
+    // Paywall bypass: remove per-site tracking cookies before the page loads
+    if (CookieManager) {
+      try {
+        const bypassHostname = new URL(url.startsWith('http') ? url : `https://${url}`).hostname.replace(/^www\./, '');
+        const bypassCookieRule = getBypassRule(bypassHostname);
+        if (bypassCookieRule?.remove_cookies?.length) {
+          const cookieDomain = '.' + bypassHostname;
+          bypassCookieRule.remove_cookies.forEach(name => {
+            CookieManager.clearByName(cookieDomain, name, true).catch(() => {});
+          });
+        }
+      } catch {}
+    }
 
     return true;
   }, [extractOrigin, saveSitePermissions, getActiveTab, activeTabId, updateTab, setForceNavCounter, processUrl, convertDeepLinkToWebUrl, shouldBlockDeepLinkLoop, webViewRef]);
