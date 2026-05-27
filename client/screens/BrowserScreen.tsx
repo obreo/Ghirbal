@@ -902,7 +902,7 @@ export default function BrowserScreen() {
   // window.open, location.assign/replace, and dynamically injected anchor elements.
   const apkDownloadBlockJS = `
     (function() {
-      var BLOCKED_EXTS = ['.apk','.xapk','.apkm','.apkx','.apks','.exe','.msi','.dmg','.deb','.rpm','.zip','.rar','.7z','.tar','.gz','.bz2','.mp3','.mp4','.avi','.mkv','.mov','.flv','.wmv','.webm','.doc','.docx','.xls','.xlsx','.ppt','.pptx','.sh','.bat','.cmd','.ps1','.iso','.img','.crx','.xpi','.jar','.pdf'];
+      var BLOCKED_EXTS = ['.apk','.xapk','.apkm','.apkx','.apks','.exe','.msi','.dmg','.deb','.rpm','.zip','.rar','.7z','.tar','.gz','.bz2','.mp3','.mp4','.avi','.mkv','.mov','.flv','.wmv','.webm','.doc','.docx','.xls','.xlsx','.ppt','.pptx','.sh','.bat','.cmd','.ps1','.iso','.img','.crx','.xpi','.jar'];
       var APK_MIME = 'application/vnd.android.package-archive';
 
       function isPdfUrl(url) {
@@ -930,7 +930,8 @@ export default function BrowserScreen() {
         if (!el || el.tagName !== 'A') return false;
         var href = el.href || '';
         if (href.startsWith('blob:')) return false; // blob handled by blobDownloadInterceptJS
-        if (el.hasAttribute('download')) return true; // block ALL downloads regardless of type
+        if (isPdfUrl(href)) return false; // PDFs are always allowed
+        if (el.hasAttribute('download')) return true; // block all non-PDF downloads
         if (href && isBlockedFileUrl(href)) return true;
         return false;
       }
@@ -1048,6 +1049,12 @@ export default function BrowserScreen() {
   // JavaScript to scan page content for blocked keywords (apk, palringo, wolf qanawat)
   const keywordPageScanJS = `
     (function() {
+      // Never scan our own safe search engine — its results will legitimately
+      // mention blocked terms (e.g. "apk" in an app-download search result).
+      // URL-level blocking (processUrl / isBlockedSearchQuery) already handles
+      // explicit keyword searches before they reach this page.
+      if (window.location.hostname.toLowerCase().includes('safesearchengine.com')) return;
+
       var TERMS = ${JSON.stringify(BLOCKED_KEYWORD_TERMS)};
       function killPage() {
         // Strip all links so nothing is clickable or copyable
@@ -1793,77 +1800,25 @@ export default function BrowserScreen() {
           setForceNavCounter(c => c + 1);
         }
       } else if (data.type === 'blobData') {
-        // All blob downloads are blocked
-        Alert.alert('Download Blocked', 'Downloads are not allowed.');
         const dataUrl = data.dataUrl as string;
-        if (false && dataUrl) {
-          if (__DEV__) console.log('[BlobData] dataUrl length:', dataUrl.length, 'preview:', dataUrl.substring(0, 80));
+        if (dataUrl) {
           const mimeMatch = dataUrl.match(/data:(.*?);base64,/);
-          if (mimeMatch) {
-            const mimeType = mimeMatch[1].toLowerCase();
-            // Only allow PDF blob downloads
-            if (mimeType !== 'application/pdf') {
-              if (__DEV__) console.log('[BlobData] Rejected non-PDF MIME type:', mimeType);
-              Alert.alert('Download Blocked', 'Only PDF files can be downloaded.');
-              return;
-            }
+          if (mimeMatch && mimeMatch[1].toLowerCase() === 'application/pdf') {
             const base64Data = dataUrl.replace(/data:.*?;base64,/, '');
-            const isImage = mimeType.startsWith('image/');
-            if (__DEV__) console.log('[BlobData] mimeType:', mimeType, 'isImage:', isImage, 'base64 length:', base64Data.length);
-
-            // Determine file extension
-            let fileExtension = '.bin';
-            if (mimeType.includes('pdf')) fileExtension = '.pdf';
-            else if (mimeType.includes('png')) fileExtension = '.png';
-            else if (mimeType.includes('jpeg') || mimeType.includes('jpg')) fileExtension = '.jpg';
-            else if (mimeType.includes('gif')) fileExtension = '.gif';
-            else if (mimeType.includes('webp')) fileExtension = '.webp';
-            else if (mimeType.includes('text/')) fileExtension = '.txt';
-            else if (isImage) fileExtension = '.png';
-
-            const fileName = `download_${Date.now()}${fileExtension}`;
+            const fileName = `download_${Date.now()}.pdf`;
             const filePath = `${FileSystem.cacheDirectory}${fileName}`;
-            if (__DEV__) console.log('[BlobData] Saving to:', filePath, 'extension:', fileExtension);
-
             (async () => {
               try {
                 await FileSystem.writeAsStringAsync(filePath, base64Data, { encoding: 'base64' });
-                if (__DEV__) console.log('[BlobData] File written successfully');
-
-                if (isImage) {
-                  // Save images to the gallery
-                  if (__DEV__) console.log('[BlobData] Requesting media library permissions...');
-                  const { status } = await MediaLibrary.requestPermissionsAsync();
-                  if (__DEV__) console.log('[BlobData] Permission status:', status);
-                  if (status === 'granted') {
-                    await MediaLibrary.saveToLibraryAsync(filePath);
-                    if (__DEV__) console.log('[BlobData] Image saved to gallery successfully');
-                    Alert.alert('Image Saved', 'Image has been saved to your gallery.');
-                  } else {
-                    if (__DEV__) console.log('[BlobData] Permission denied');
-                    Alert.alert('Permission Required', 'Storage permission is needed to save images.');
-                  }
-                } else {
-                  // Non-image files: save to documents directory
-                  const docPath = `${FileSystem.documentDirectory}${fileName}`;
-                  await FileSystem.copyAsync({ from: filePath, to: docPath });
-                  if (__DEV__) console.log('[BlobData] Non-image file saved to:', docPath);
-                  Alert.alert('Download Complete', 'File has been downloaded successfully.');
-                }
+                const docPath = `${FileSystem.documentDirectory}${fileName}`;
+                await FileSystem.copyAsync({ from: filePath, to: docPath });
+                await Linking.openURL(docPath);
               } catch (error) {
-                console.error('[BlobData] Error saving blob data:', error);
-                Alert.alert('Download Failed', 'Could not save the file to your device.');
+                Alert.alert('Download Failed', 'Could not open the PDF.');
               }
             })();
           } else {
-            // Fallback to original method if data URL format is unexpected
-            Linking.openURL(dataUrl).catch(() => {
-              Alert.alert(
-                'Download',
-                'The file is too large to open directly. You can take a screenshot to save it.',
-                [{ text: 'OK' }]
-              );
-            });
+            Alert.alert('Download Blocked', 'Only PDF files can be downloaded.');
           }
         }
       } else if (data.type === 'consoleLog') {
@@ -5529,9 +5484,14 @@ export default function BrowserScreen() {
                   );
 
                   if (isGoogleAuthPopup) {
-                    if (__DEV__) console.log('  [OAuth] Detected Google auth popup, opening new tab');
-                    // Open in new tab to simulate popup and preserve main page context
-                    createTab(targetUrl);
+                    if (__DEV__) console.log('  [OAuth] Detected Google auth popup, navigating current tab');
+                    // Navigate the current tab to the Google auth URL instead of opening a new tab.
+                    // A separate WebView tab has no window.opener, so Google's /gsi/transform cannot
+                    // postMessage the token back to the relying party — the flow gets stuck there.
+                    // In-tab navigation lets Google redirect back to the site naturally after login.
+                    if (webViewRef.current && targetUrl) {
+                      webViewRef.current.injectJavaScript(`window.location.href = ${JSON.stringify(targetUrl)}; true;`);
+                    }
                   } else if (webViewRef.current && targetUrl) {
                     if (targetUrl.startsWith('blob:')) {
                       // Debounce: only process one blob URL at a time (sites often fire multiple)
@@ -5673,10 +5633,15 @@ export default function BrowserScreen() {
                 sharedCookiesEnabled={true}
                 onFileDownload={(event: any) => {
                   if (__DEV__) console.log('[onFileDownload] Triggered, url:', event.nativeEvent.downloadUrl);
-                  // All downloads are blocked
-                  Alert.alert('Download Blocked', 'Downloads are not allowed.');
-                  return;
                   const url = event.nativeEvent.downloadUrl;
+                  // Allow PDF files — open via system viewer
+                  if (url && !url.startsWith('blob:')) {
+                    const lower = url.toLowerCase().split('?')[0].split('#')[0];
+                    if (lower.endsWith('.pdf')) {
+                      Linking.openURL(url).catch(() => Alert.alert('Error', 'Could not open PDF.'));
+                      return;
+                    }
+                  }
 
                   // Handle blob: URLs - DownloadManager only supports HTTP/HTTPS
                   // Use the stored __blobMap from the preload intercept (avoids CSP/fetch issues)
@@ -5746,43 +5711,8 @@ export default function BrowserScreen() {
                     return;
                   }
 
-                  let hostname = 'unknown';
-                  try {
-                    hostname = new URL(url).hostname;
-                    if (!hostname) hostname = new URL(currentUrl).hostname;
-                  } catch {
-                    try { hostname = new URL(currentUrl).hostname; } catch { }
-                  }
-
-                  // Use ref to get latest permission value
-                  if (allowedStorageSitesRef.current.has(hostname)) {
-                    Linking.openURL(url);
-                  } else {
-                    Alert.alert(
-                      'File Storage',
-                      `Allow ${hostname} to save files to your device?`,
-                      [
-                        {
-                          text: 'Deny',
-                          style: 'cancel',
-                          onPress: () => {
-                            // Do nothing, download blocked/ignored
-                          }
-                        },
-                        {
-                          text: 'Allow',
-                          onPress: () => {
-                            const newSites = new Set(allowedStorageSites);
-                            newSites.add(hostname);
-                            setAllowedStorageSites(newSites);
-
-                            // Proceed with download
-                            Linking.openURL(url);
-                          }
-                        }
-                      ]
-                    );
-                  }
+                  // Block all non-PDF downloads
+                  Alert.alert('Download Blocked', 'Downloads are not allowed.');
                 }}
                 onReceivedError={(syntheticEvent: any) => {
                   const { nativeEvent } = syntheticEvent;

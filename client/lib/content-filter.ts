@@ -272,7 +272,7 @@ export function isBlockedFacebookUrl(url: string): boolean {
 // =============== BLOCKED SEARCH TERMS & KEYWORD URLS ================
 // ====================================================================
 
-export const BLOCKED_KEYWORD_TERMS = ['apk', 'palringo', 'qanawat'];
+export const BLOCKED_KEYWORD_TERMS = ['apk', 'xapk', 'palringo', 'qanawat'];
 
 export function isBlockedSearchQuery(url: string): boolean {
   try {
